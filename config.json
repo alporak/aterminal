@@ -12,7 +12,14 @@
         "command_history": [
             ".shrec"
         ],
-        "predefined_commands": []
+        "predefined_commands": [
+            {
+                "name": "High prio",
+                "command": ".shrec"
+            }
+        ],
+        "last_used_port": "COM3",
+        "last_used_baudrate": 115200
     },
     "tls": {
         "enabled": false,

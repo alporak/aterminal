@@ -6,21 +6,16 @@
         "ipv6": false,
         "timeout_seconds": 300
     },
-    "serial_monitor": {
-        "default_port": "COM1",
-        "default_baudrate": 9600,
-        "command_history": [
-            ".shrec"
-        ],
-        "predefined_commands": [
-            {
-                "name": "High prio",
-                "command": ".shrec"
-            }
-        ],
-        "last_used_port": "COM3",
-        "last_used_baudrate": 115200
-    },
+    "server_commands": [
+        {
+            "name": "Get Version & Status",
+            "command": "getver;getstatus"
+        },
+        {
+            "name": "Reboot Device",
+            "command": "cpureset"
+        }
+    ],
     "tls": {
         "enabled": false,
         "root_cert_path": "root.pem",
@@ -46,5 +41,25 @@
         "enabled": false,
         "command": "READTAC 356307048061781,banga,,,212.59.13.226,7086",
         "period_seconds": 120
+    },
+    "serial_monitor": {
+        "default_port": "COM1",
+        "default_baudrate": 115200,
+        "last_used_port": "",
+        "last_used_baudrate": 115200,
+        "predefined_commands": [
+            {
+                "name": "Device Status Check",
+                "command": "getinfo\r\ngetver\r\n"
+            },
+            {
+                "name": "Reboot Device",
+                "command": "cpureset"
+            }
+        ],
+        "command_history": [
+            "getstatus",
+            "getgps"
+        ]
     }
 }

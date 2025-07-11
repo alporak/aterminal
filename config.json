@@ -1,0 +1,43 @@
+{
+    "server": {
+        "protocol": "tcp",
+        "host": "0.0.0.0",
+        "port": 7580,
+        "ipv6": false,
+        "timeout_seconds": 300
+    },
+    "serial_monitor": {
+        "default_port": "COM1",
+        "default_baudrate": 9600,
+        "command_history": [
+            ".shrec"
+        ],
+        "predefined_commands": []
+    },
+    "tls": {
+        "enabled": false,
+        "root_cert_path": "root.pem",
+        "key_path": "ca.key"
+    },
+    "logging": {
+        "log_to_file": true,
+        "log_file_name": "server_main.log",
+        "level": "INFO"
+    },
+    "device_management": {
+        "database_file": "devices.db"
+    },
+    "features": {
+        "beltrans_mode": false
+    },
+    "file_transfer": {
+        "mode": "TM25",
+        "file_path": "C:\\gps_fota\\MT3333_fw.bin",
+        "filename": "MT3333_FW_5_1_9.bin"
+    },
+    "gprs_sender": {
+        "enabled": false,
+        "command": "READTAC 356307048061781,banga,,,212.59.13.226,7086",
+        "period_seconds": 120
+    }
+}

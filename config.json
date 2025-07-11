@@ -45,19 +45,25 @@
     "serial_monitor": {
         "default_port": "COM1",
         "default_baudrate": 115200,
-        "last_used_port": "",
+        "last_used_port": "COM3",
         "last_used_baudrate": 115200,
         "predefined_commands": [
             {
                 "name": "Device Status Check",
-                "command": "getinfo\r\ngetver\r\n"
+                "command": ".info"
             },
             {
                 "name": "Reboot Device",
-                "command": "cpureset"
+                "command": ".reset"
+            },
+            {
+                "name": "High Prio Recs",
+                "command": ".shrec"
             }
         ],
         "command_history": [
+            ".shrec",
+            ".info",
             "getstatus",
             "getgps"
         ]

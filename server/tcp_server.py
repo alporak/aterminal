@@ -4,6 +4,7 @@ import socket
 import threading
 import time # Import time for delays
 import binascii
+import struct
 from PySide6.QtCore import QThread, Signal
 from core.config_manager import config
 from protocols.codec import decode_packet, encode_codec12_command

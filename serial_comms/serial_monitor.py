@@ -136,7 +136,12 @@ class SerialMonitor(QWidget):
 
         self.connect_button.clicked.connect(self.toggle_connection); self.send_button.clicked.connect(self._send_command_from_input)
         self.add_cmd_btn.clicked.connect(self._add_predefined); self.edit_cmd_btn.clicked.connect(self._edit_predefined); self.del_cmd_btn.clicked.connect(self._del_predefined)
-        self.clear_button.clicked.connect(self.terminal_view.clear); self.auto_scroll_checkbox.stateChanged.connect(lambda state: setattr(self, 'auto_scroll_enabled', state == Qt.Checked))
+        self.clear_button.clicked.connect(self.terminal_view.clear)
+        self.auto_scroll_checkbox.stateChanged.connect(self._handle_auto_scroll_checkbox)
+
+    @Slot(int)
+    def _handle_auto_scroll_checkbox(self, state):
+        self.auto_scroll_enabled = (state == Qt.Checked)
 
     def _load_ui_data(self):
         self.history_combo.addItems(self.command_history)
@@ -191,13 +196,23 @@ class SerialMonitor(QWidget):
         self.rx_buffer.extend(data)
 
     def _update_terminal_view(self):
-        if not self.rx_buffer: return
-        text = self.rx_buffer.decode('utf-8', errors='ignore'); self.rx_buffer.clear()
-        cursor = self.terminal_view.textCursor(); cursor.movePosition(QTextCursor.End)
-        self.terminal_view.setTextCursor(cursor); self.terminal_view.insertPlainText(text)
+        if not self.rx_buffer:
+            return
+        text = self.rx_buffer.decode('utf-8', errors='ignore')
+        self.rx_buffer.clear()
+        cursor = self.terminal_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.terminal_view.setTextCursor(cursor)
+        # Ensure RX data ends with a newline
+        if not text.endswith('\n'):
+            text += '\n'
+        self.terminal_view.insertPlainText(text)
         if self.terminal_view.blockCount() > MAX_TERMINAL_BLOCKS:
-            cursor.movePosition(QTextCursor.Start); cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, self.terminal_view.blockCount() - MAX_TERMINAL_BLOCKS); cursor.removeSelectedText()
-        if self.auto_scroll_enabled: self.terminal_view.verticalScrollBar().setValue(self.terminal_view.verticalScrollBar().maximum())
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, self.terminal_view.blockCount() - MAX_TERMINAL_BLOCKS)
+            cursor.removeSelectedText()
+        if self.auto_scroll_enabled:
+            self.terminal_view.verticalScrollBar().setValue(self.terminal_view.verticalScrollBar().maximum())
 
     def start_file_logging(self):
         self.stop_file_logging()
@@ -266,7 +281,8 @@ class SerialMonitor(QWidget):
             index = self.predefined_list.row(current_item); del self.predefined_commands[index]; self.predefined_list.takeItem(index)
 
     def _log_to_terminal(self, message: str, color: str):
-        self.terminal_view.appendHtml(f'<font color="{color}">{message}</font>')
+        # Ensure every log entry starts on a new line
+        self.terminal_view.appendHtml(f'<font color="{color}">{message}</font><br>')
 
     def save_settings(self):
         config.settings['serial_monitor']['command_history'] = list(self.command_history)

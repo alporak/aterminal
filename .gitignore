@@ -1,3 +1,6 @@
 __pycache__/
 logs/
+server_logs/
 devices.db
+dist/
+build/

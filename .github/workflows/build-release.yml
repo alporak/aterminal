@@ -9,8 +9,9 @@ on:
 
 jobs:
   build-and-release:
+    permissions:
+      contents: write
     runs-on: windows-latest
-
     steps:
       - name: Check out code
         uses: actions/checkout@v4

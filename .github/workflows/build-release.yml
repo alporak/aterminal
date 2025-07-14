@@ -38,10 +38,9 @@ jobs:
       - name: Build executable with PyInstaller
         run: |
           pyinstaller main.py `
-            --name "TeltonikaToolkit" `
+            --name "aterminal" `
             --onefile `
             --windowed `
-            --icon="path/to/your/icon.ico" `
             --add-data "config.json;." `
             --add-data "server_logs;server_logs" `
             --add-data "logs;logs" `
@@ -55,5 +54,5 @@ jobs:
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TeltonikaToolkit-Windows-${{ github.ref_name }}
-          path: dist/TeltonikaToolkit.exe
+          name: aterminal-Windows-${{ github.ref_name }}
+          path: dist/aterminal.exe

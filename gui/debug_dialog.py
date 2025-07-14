@@ -26,7 +26,6 @@ class DebugDialog(QDialog):
         self.delay_spinbox = QDoubleSpinBox()
         self.delay_spinbox.setSuffix(" seconds")
         self.delay_spinbox.setMinimum(0.0)
-        self.delay_spinbox.setMaximum(60.0) # 60-second max delay
         self.delay_spinbox.setSingleStep(0.5)
         # Set value to the first non-zero delay found, or 1.0 as a default
         initial_delay = self.settings.get('delay_imei_ack') or self.settings.get('delay_record_ack') or 1.0

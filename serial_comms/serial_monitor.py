@@ -1,17 +1,16 @@
-# serial_comms/serial_monitor.py
-
 import sys
 import os
 import collections
 import subprocess
 from datetime import datetime
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QPushButton, QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QPushButton, QComboBox,
     QLabel, QListWidget, QListWidgetItem, QSplitter, QDialogButtonBox,
-    QInputDialog, QMessageBox, QCheckBox
+    QInputDialog, QMessageBox, QCheckBox, QLineEdit
 )
 from PySide6.QtCore import QThread, Signal, QObject, QTimer, Qt, Slot
-from PySide6.QtGui import QFont, QTextCursor
+### FIX 2: Import QTextDocument for search flags ###
+from PySide6.QtGui import QFont, QTextCursor, QTextDocument
 import serial
 import serial.tools.list_ports
 from core.config_manager import config
@@ -22,6 +21,7 @@ COMMAND_HISTORY_SIZE = 50
 RECONNECT_INTERVAL_MS = 2000
 LOG_DIRECTORY = "logs"
 
+# ... SerialWorker class is unchanged ...
 class SerialWorker(QObject):
     data_received = Signal(bytes)
     error_occurred = Signal(str)
@@ -75,7 +75,8 @@ class SerialMonitor(QWidget):
         self.log_file = None
         self.current_log_filepath = ""
         self.is_attempting_reconnect = False
-        self.auto_scroll_enabled = True
+        self.user_initiated_disconnect = False
+        self.auto_scroll_enabled = config.get('serial_monitor.auto_scroll_enabled', True)
 
         os.makedirs(LOG_DIRECTORY, exist_ok=True)
         self.command_history = collections.deque(config.get('serial_monitor.command_history', []), maxlen=COMMAND_HISTORY_SIZE)
@@ -93,8 +94,11 @@ class SerialMonitor(QWidget):
         control_layout = QHBoxLayout()
         self.port_combo = QComboBox(); self.baud_combo = QComboBox(); self.connect_button = QPushButton("Connect")
         self.auto_reconnect_checkbox = QCheckBox("Auto Reconnect"); self.auto_reconnect_checkbox.setChecked(True)
-        self.auto_scroll_checkbox = QCheckBox("Auto Scroll"); self.auto_scroll_checkbox.setChecked(True)
+        self.auto_scroll_checkbox = QCheckBox("Auto Scroll")
+        self.auto_scroll_checkbox.setChecked(self.auto_scroll_enabled)
         self.clear_button = QPushButton("Clear")
+        ### FIX 2: Add a Find button ###
+        self.find_button = QPushButton("Find")
 
         self.refresh_ports()
         self.baud_combo.addItems(['9600', '19200', '38400', '57600', '115200', '921600'])
@@ -105,13 +109,37 @@ class SerialMonitor(QWidget):
         control_layout.addWidget(QLabel("Port:")); control_layout.addWidget(self.port_combo)
         control_layout.addWidget(QLabel("Baudrate:")); control_layout.addWidget(self.baud_combo)
         control_layout.addWidget(self.auto_reconnect_checkbox); control_layout.addWidget(self.auto_scroll_checkbox)
-        control_layout.addWidget(self.clear_button); control_layout.addWidget(self.connect_button); control_layout.addStretch()
+        control_layout.addWidget(self.clear_button)
+        ### FIX 2: Add find button to layout ###
+        control_layout.addWidget(self.find_button)
+        control_layout.addWidget(self.connect_button); control_layout.addStretch()
         main_layout.addLayout(control_layout)
 
+        ### FIX 2 START: Add a hidden search widget ###
+        self.search_widget = QWidget()
+        search_layout = QHBoxLayout(self.search_widget)
+        search_layout.setContentsMargins(0, 0, 0, 5)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search terminal...")
+        self.search_case_check = QCheckBox("Case Sensitive")
+        find_prev_btn = QPushButton("Previous")
+        find_next_btn = QPushButton("Next")
+        close_search_btn = QPushButton("✕")
+        search_layout.addWidget(QLabel("Find:"))
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_case_check)
+        search_layout.addWidget(find_prev_btn)
+        search_layout.addWidget(find_next_btn)
+        search_layout.addWidget(close_search_btn)
+        main_layout.addWidget(self.search_widget)
+        self.search_widget.hide()
+        ### FIX 2 END ###
+
         main_splitter = QSplitter(Qt.Vertical); main_layout.addWidget(main_splitter)
-        self.terminal_view = QPlainTextEdit(); self.terminal_view.setReadOnly(True); self.terminal_view.setFont(QFont("Consolas", 10)); self.terminal_view.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        self.terminal_view = QTextEdit(); self.terminal_view.setReadOnly(True); self.terminal_view.setFont(QFont("Consolas", 10)); self.terminal_view.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
 
         bottom_panel = QWidget(); bottom_panel_layout = QHBoxLayout(bottom_panel)
+        # ... rest of the UI setup is unchanged ...
         tx_splitter = QSplitter(Qt.Horizontal); bottom_panel_layout.addWidget(tx_splitter)
         predefined_widget = QWidget(); predefined_layout = QVBoxLayout(predefined_widget)
         predefined_layout.addWidget(QLabel("Predefined Commands (Double-click to send)")); self.predefined_list = QListWidget()
@@ -139,18 +167,30 @@ class SerialMonitor(QWidget):
         self.clear_button.clicked.connect(self.terminal_view.clear)
         self.auto_scroll_checkbox.stateChanged.connect(self._handle_auto_scroll_checkbox)
 
+        ### FIX 2: Connect search buttons ###
+        self.find_button.clicked.connect(self.toggle_search_widget)
+        close_search_btn.clicked.connect(self.search_widget.hide)
+        find_next_btn.clicked.connect(self._find_next)
+        find_prev_btn.clicked.connect(self._find_previous)
+        self.search_input.returnPressed.connect(self._find_next)
+
     @Slot(int)
     def _handle_auto_scroll_checkbox(self, state):
-        self.auto_scroll_enabled = (state == Qt.Checked)
+        self.auto_scroll_enabled = (state == Qt.CheckState.Checked)
+        config.settings['serial_monitor']['auto_scroll_enabled'] = self.auto_scroll_enabled
+        # No need to call save_config here, we can do it once when the app closes.
 
+    # ... (other methods unchanged until _update_terminal_view) ...
     def _load_ui_data(self):
         self.history_combo.addItems(self.command_history)
         for cmd in self.predefined_commands: self.predefined_list.addItem(QListWidgetItem(cmd['name']))
     
     def toggle_connection(self):
         if (self.serial_thread and self.serial_thread.isRunning()) or self.is_attempting_reconnect:
+            self.user_initiated_disconnect = True
             self._stop_current_connection()
         else:
+            self.user_initiated_disconnect = False
             self._start_new_connection()
 
     def _start_new_connection(self):
@@ -177,11 +217,13 @@ class SerialMonitor(QWidget):
         else:
             self.stop_file_logging(); self.update_timer.stop(); self._update_terminal_view()
             if self.serial_thread: self.serial_thread.quit(); self.serial_thread.wait()
-            if self.auto_reconnect_checkbox.isChecked() and not self.is_attempting_reconnect: # check prevents double start
+            # Only auto-reconnect if not user-initiated disconnect
+            if self.auto_reconnect_checkbox.isChecked() and not self.is_attempting_reconnect and not self.user_initiated_disconnect:
                 self.is_attempting_reconnect = True; self.reconnect_timer.start(); self.connect_button.setText("Cancel Reconnect")
                 self._log_to_terminal("--- Connection lost. Attempting to reconnect... ---", "#FFA500")
             else:
                 self.connect_button.setText("Connect")
+            self.user_initiated_disconnect = False
 
     def _attempt_reconnect(self):
         port_to_find = self.port_combo.currentText()
@@ -195,25 +237,32 @@ class SerialMonitor(QWidget):
             except Exception: pass
         self.rx_buffer.extend(data)
 
+    ### FIX 1: Modified _update_terminal_view for conditional auto-scrolling ###
     def _update_terminal_view(self):
         if not self.rx_buffer:
             return
+
+        scroll_bar = self.terminal_view.verticalScrollBar()
+        is_at_bottom = scroll_bar.value() == scroll_bar.maximum()
+
         text = self.rx_buffer.decode('utf-8', errors='ignore')
         self.rx_buffer.clear()
-        cursor = self.terminal_view.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.terminal_view.setTextCursor(cursor)
-        # Ensure RX data ends with a newline
-        if not text.endswith('\n'):
-            text += '\n'
+        
+        # Move cursor to the end to append text
+        self.terminal_view.moveCursor(QTextCursor.End)
         self.terminal_view.insertPlainText(text)
-        if self.terminal_view.blockCount() > MAX_TERMINAL_BLOCKS:
+        
+        if self.terminal_view.document().blockCount() > MAX_TERMINAL_BLOCKS:
+            cursor = self.terminal_view.textCursor()
             cursor.movePosition(QTextCursor.Start)
-            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, self.terminal_view.blockCount() - MAX_TERMINAL_BLOCKS)
+            # This logic correctly selects the first N blocks to be removed
+            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, self.terminal_view.document().blockCount() - MAX_TERMINAL_BLOCKS)
             cursor.removeSelectedText()
-        if self.auto_scroll_enabled:
-            self.terminal_view.verticalScrollBar().setValue(self.terminal_view.verticalScrollBar().maximum())
 
+        if self.auto_scroll_enabled or is_at_bottom:
+            scroll_bar.setValue(scroll_bar.maximum())
+
+    # ... (file logging methods are unchanged) ...
     def start_file_logging(self):
         self.stop_file_logging()
         self.current_log_filepath = os.path.join(LOG_DIRECTORY, datetime.now().strftime("serial_log_%Y-%m-%d.log"))
@@ -241,6 +290,7 @@ class SerialMonitor(QWidget):
         if sys.platform == "win32": os.startfile(self.current_log_filepath)
         else: subprocess.run(['xdg-open', self.current_log_filepath])
 
+
     def _send_command(self, command: str):
         if not (self.serial_worker and self.serial_thread.isRunning()):
             QMessageBox.warning(self, "Not Connected", "Please connect to a serial port first."); return
@@ -249,6 +299,7 @@ class SerialMonitor(QWidget):
         self.serial_worker.send_data(data_to_send); self._log_to_terminal(f"TX: {command}", "#87CEFA")
         if command not in self.command_history: self.command_history.appendleft(command); self.history_combo.clear(); self.history_combo.addItems(self.command_history)
 
+    # ... (_send_command_from_input, etc. are unchanged) ...
     def _send_command_from_input(self):
         self._send_command(self.tx_input.toPlainText())
 
@@ -280,18 +331,66 @@ class SerialMonitor(QWidget):
         if QMessageBox.question(self, "Delete Command", f"Are you sure you want to delete '{current_item.text()}'?") == QMessageBox.Yes:
             index = self.predefined_list.row(current_item); del self.predefined_commands[index]; self.predefined_list.takeItem(index)
 
+    ### FIX 1: Modified _log_to_terminal to fix unconditional auto-scrolling ###
     def _log_to_terminal(self, message: str, color: str):
-        # Ensure every log entry starts on a new line
-        self.terminal_view.appendHtml(f'<font color="{color}">{message}</font><br>')
+        scroll_bar = self.terminal_view.verticalScrollBar()
+        is_at_bottom = scroll_bar.value() == scroll_bar.maximum()
+
+        self.terminal_view.moveCursor(QTextCursor.End)
+        # Using insertHtml instead of appendHtml gives us control over scrolling
+        self.terminal_view.insertHtml(f'<font color="{color}">{message}</font><br>')
+
+        if self.auto_scroll_enabled or is_at_bottom:
+            scroll_bar.setValue(scroll_bar.maximum())
+
+    ### FIX 2 START: Methods for search functionality ###
+    def toggle_search_widget(self):
+        is_visible = self.search_widget.isVisible()
+        self.search_widget.setVisible(not is_visible)
+        if not is_visible:
+            self.search_input.setFocus()
+
+    def _find(self, find_backwards=False):
+        text_to_find = self.search_input.text()
+        if not text_to_find:
+            return
+
+        flags = QTextDocument.FindFlag()
+        if find_backwards:
+            flags |= QTextDocument.FindBackward
+        if self.search_case_check.isChecked():
+            flags |= QTextDocument.FindCaseSensitively
+            
+        # find() returns True if found, False otherwise
+        if not self.terminal_view.find(text_to_find, flags):
+            # If not found, wrap around to the beginning/end to search again
+            cursor = self.terminal_view.textCursor()
+            cursor.movePosition(QTextCursor.End if find_backwards else QTextCursor.Start)
+            self.terminal_view.setTextCursor(cursor)
+            # Try one more time from the wrapped position
+            self.terminal_view.find(text_to_find, flags)
+
+    def _find_next(self):
+        self._find(find_backwards=False)
+
+    def _find_previous(self):
+        self._find(find_backwards=True)
+    ### FIX 2 END ###
 
     def save_settings(self):
         config.settings['serial_monitor']['command_history'] = list(self.command_history)
         config.settings['serial_monitor']['predefined_commands'] = self.predefined_commands
+        config.settings['serial_monitor']['auto_scroll_enabled'] = self.auto_scroll_enabled
         config.save_config()
 
     def refresh_ports(self):
         """Refresh the list of available serial ports in the port_combo UI element."""
+        current_port = self.port_combo.currentText()
         self.port_combo.clear()
         ports = serial.tools.list_ports.comports()
         for port in ports:
             self.port_combo.addItem(port.device)
+        
+        # Try to restore the previously selected port
+        if current_port and self.port_combo.findText(current_port) != -1:
+            self.port_combo.setCurrentText(current_port)

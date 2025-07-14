@@ -1,13 +1,12 @@
-
 import sys
 import binascii
 import struct
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QListWidget, QListWidgetItem, QLineEdit, QStatusBar, QTabWidget,
-    QMessageBox, QFileDialog, QSplitter, QInputDialog, QMenu
+    QMessageBox, QFileDialog, QSplitter, QInputDialog, QMenu, QCheckBox, QLabel
 )
-from PySide6.QtGui import QColor, QAction
+from PySide6.QtGui import QColor, QAction, QTextCursor, QKeySequence, QTextDocument
 from PySide6.QtCore import Qt, Slot
 from server.tcp_server import TCPServer
 from server.udp_server import UDPServer
@@ -32,19 +31,10 @@ class MainWindow(QMainWindow):
         self.create_actions()
         self.create_menus()
 
-    # setup_ui and status_bar property remain unchanged...
     def setup_ui(self):
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
         self.setCentralWidget(main_widget)
-        control_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start Server")
-        self.stop_button = QPushButton("Stop Server")
-        self.stop_button.setEnabled(False)
-        control_layout.addWidget(self.start_button)
-        control_layout.addWidget(self.stop_button)
-        control_layout.addStretch()
-        main_layout.addLayout(control_layout)
         splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter)
         left_panel = QWidget()
@@ -52,14 +42,47 @@ class MainWindow(QMainWindow):
         self.device_list_widget = QListWidget()
         left_layout.addWidget(self.device_list_widget)
         self.tabs = QTabWidget()
+
+        # --- Server Log Tab ---
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
+        log_widget.setLayout(log_layout)
+
+        log_controls_layout = QHBoxLayout()
+        self.server_log_auto_scroll_check = QCheckBox("Auto Scroll")
+        self.server_log_auto_scroll_check.setChecked(True)
+        log_controls_layout.addWidget(self.server_log_auto_scroll_check)
+        log_controls_layout.addStretch()
+        log_layout.addLayout(log_controls_layout)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         log_layout.addWidget(self.log_view)
-        self.serial_monitor = SerialMonitor()
-        self.tabs.addTab(log_widget, "Server Log")
-        self.tabs.addTab(self.serial_monitor, "Serial Monitor")
+
+        self.server_search_widget = QWidget()
+        search_layout = QHBoxLayout(self.server_search_widget)
+        search_layout.setContentsMargins(0, 5, 0, 0)
+        self.server_search_input = QLineEdit()
+        self.server_search_input.setPlaceholderText("Search log...")
+        self.server_search_case_check = QCheckBox("Case Sensitive")
+        find_prev_btn = QPushButton("Previous")
+        find_next_btn = QPushButton("Next")
+        close_search_btn = QPushButton("✕")
+        search_layout.addWidget(QLabel("Find:"))
+        search_layout.addWidget(self.server_search_input)
+        search_layout.addWidget(self.server_search_case_check)
+        search_layout.addWidget(find_prev_btn)
+        search_layout.addWidget(find_next_btn)
+        search_layout.addWidget(close_search_btn)
+        log_layout.addWidget(self.server_search_widget)
+        self.server_search_widget.hide()
+
+        # Connections for search
+        close_search_btn.clicked.connect(self.server_search_widget.hide)
+        find_next_btn.clicked.connect(self._find_next_in_server_log)
+        find_prev_btn.clicked.connect(self._find_prev_in_server_log)
+        self.server_search_input.returnPressed.connect(self._find_next_in_server_log)
+
         command_layout = QHBoxLayout()
         self.command_input = QLineEdit()
         self.command_input.setPlaceholderText("Select a device and type a command (e.g., getinfo)...")
@@ -67,13 +90,18 @@ class MainWindow(QMainWindow):
         command_layout.addWidget(self.command_input)
         command_layout.addWidget(self.send_button)
         log_layout.addLayout(command_layout)
+
+        # --- Serial Monitor Tab ---
+        self.serial_monitor = SerialMonitor()
+
+        self.tabs.addTab(log_widget, "Server Log")
+        self.tabs.addTab(self.serial_monitor, "Serial Monitor")
+
         splitter.addWidget(left_panel)
         splitter.addWidget(self.tabs)
         splitter.setSizes([250, 950])
         self.setStatusBar(QStatusBar())
         self.status_bar.showMessage("Server stopped.")
-        self.start_button.clicked.connect(self.start_server)
-        self.stop_button.clicked.connect(self.stop_server)
         self.send_button.clicked.connect(self.send_command)
         self.device_list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.device_list_widget.customContextMenuRequested.connect(self.open_device_menu)
@@ -90,11 +118,22 @@ class MainWindow(QMainWindow):
         self.settings_action.triggered.connect(self.open_settings)
         self.exit_action.triggered.connect(self.close)
 
-        # Log Menu Actions  <-- MOVED AND ADDED HERE
-        self.export_log_action = QAction("&Export Log...", self)
-        self.clear_log_action = QAction("&Clear Log View", self)
+        self.find_action = QAction("&Find...", self)
+        self.find_action.setShortcut(QKeySequence.Find) # Ctrl+F
+        self.find_action.triggered.connect(self._toggle_find_widget)
+
+        # Server Options Menu Actions
+        self.start_server_action = QAction("Start Server", self)
+        self.stop_server_action = QAction("Stop Server", self)
+        self.show_config_action = QAction("Show Active Configuration", self)
+        self.export_log_action = QAction("Export Log...", self)
+        self.clear_log_action = QAction("Clear Log View", self)
+        self.start_server_action.triggered.connect(self.start_server)
+        self.stop_server_action.triggered.connect(self.stop_server)
+        self.show_config_action.triggered.connect(self.show_active_config)
         self.export_log_action.triggered.connect(self.export_log)
-        self.clear_log_action.triggered.connect(self.log_view.clear) # Direct connection
+        self.clear_log_action.triggered.connect(self.log_view.clear)
+        self.stop_server_action.setEnabled(False)
 
         # Debug Menu Actions
         self.debug_settings_action = QAction("Response Delays...", self)
@@ -111,19 +150,24 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.settings_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
+        
+        edit_menu = menu_bar.addMenu("&Edit")
+        edit_menu.addAction(self.find_action)
 
-        # Log Menu  <-- RESTORED
-        log_menu = menu_bar.addMenu("&Log")
-        log_menu.addAction(self.export_log_action)
-        log_menu.addAction(self.clear_log_action)
+        # Server Options Menu
+        server_menu = menu_bar.addMenu("Server Options")
+        server_menu.addAction(self.start_server_action)
+        server_menu.addAction(self.stop_server_action)
+        server_menu.addSeparator()
+        server_menu.addAction(self.show_config_action)
+        server_menu.addSeparator()
+        server_menu.addAction(self.export_log_action)
+        server_menu.addAction(self.clear_log_action)
 
         # Debug Menu
         debug_menu = menu_bar.addMenu("&Debug")
         debug_menu.addAction(self.debug_settings_action)
         debug_menu.addAction(self.kick_device_action)
-
-    # All other methods (start_server, stop_server, log, etc.) remain unchanged.
-    # They are included below for completeness of the file.
 
     def start_server(self):
         protocol = config.get('server.protocol')
@@ -134,16 +178,21 @@ class MainWindow(QMainWindow):
         self.server_thread.device_disconnected.connect(self.remove_device_from_list)
         self.server_thread.data_received.connect(self.handle_data_received)
         self.server_thread.start()
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self.start_server_action.setEnabled(False)
+        self.stop_server_action.setEnabled(True)
         self.status_bar.showMessage(f"{protocol.upper()} server running on {config.get('server.host')}:{config.get('server.port')}", 5000)
 
     def stop_server(self):
         if self.server_thread and self.server_thread.isRunning():
             self.server_thread.stop()
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.start_server_action.setEnabled(True)
+        self.stop_server_action.setEnabled(False)
         self.status_bar.showMessage("Server stopped.")
+    def show_active_config(self):
+        protocol = config.get('server.protocol')
+        host = config.get('server.host')
+        port = config.get('server.port')
+        QMessageBox.information(self, "Active Server Configuration", f"Protocol: {protocol.upper()}\nHost: {host}\nPort: {port}")
 
     def update_debug_actions(self):
         is_device_selected = bool(self.device_list_widget.selectedItems())
@@ -164,12 +213,23 @@ class MainWindow(QMainWindow):
         imei = current_item.data(Qt.UserRole)
         if self.server_thread and self.server_thread.isRunning():
             self.server_thread.kick_device(imei)
-
+            
     @Slot(str, str)
     def log(self, message, level="info"):
+        scroll_bar = self.log_view.verticalScrollBar()
+        # Check if scrollbar is at the bottom before we add text
+        is_at_bottom = scroll_bar.value() == scroll_bar.maximum()
+
         color_map = {"info": "blue", "warn": "orange", "error": "red", "data": "#800080"}
         color = color_map.get(level, "black")
-        self.log_view.append(f'<font color="{color}">[{gtime()}] {message}</font>')
+        
+        # Use moveCursor and insertHtml instead of append()
+        self.log_view.moveCursor(QTextCursor.End)
+        self.log_view.insertHtml(f'<font color="{color}">[{gtime()}] {message}</font><br>')
+
+        # Scroll to the bottom only if the checkbox is checked OR if we were already there
+        if self.server_log_auto_scroll_check.isChecked() or is_at_bottom:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     @Slot(str, str)
     def add_device_to_list(self, imei, ip):
@@ -253,7 +313,44 @@ class MainWindow(QMainWindow):
             item.setText(f"{new_name} [{imei}]")
             self.log(f"Device {imei} renamed to '{new_name}'", "info")
 
+    def _toggle_find_widget(self):
+        # This function handles the Ctrl+F shortcut and routes it to the correct tab.
+        current_tab_widget = self.tabs.currentWidget()
+        if current_tab_widget == self.serial_monitor:
+            self.serial_monitor.toggle_search_widget()
+        else: # Assumes it's the server log tab
+            is_visible = self.server_search_widget.isVisible()
+            self.server_search_widget.setVisible(not is_visible)
+            if not is_visible:
+                self.server_search_input.setFocus()
+                
+    def _find_in_log(self, find_backwards=False):
+        text_to_find = self.server_search_input.text()
+        if not text_to_find:
+            return
+
+        flags = QTextDocument.FindFlag()
+        if find_backwards:
+            flags |= QTextDocument.FindBackward
+        if self.server_search_case_check.isChecked():
+            flags |= QTextDocument.FindCaseSensitively
+
+        if not self.log_view.find(text_to_find, flags):
+            # If not found, wrap around to the beginning/end
+            cursor = self.log_view.textCursor()
+            cursor.movePosition(QTextCursor.End if find_backwards else QTextCursor.Start)
+            self.log_view.setTextCursor(cursor)
+            self.log_view.find(text_to_find, flags)
+
+    def _find_next_in_server_log(self):
+        self._find_in_log(find_backwards=False)
+
+    def _find_prev_in_server_log(self):
+        self._find_in_log(find_backwards=True)
+    
     def closeEvent(self, event):
         self.stop_server()
         self.device_manager.close()
+        # Allow serial monitor to save its settings
+        self.serial_monitor.save_settings()
         event.accept()

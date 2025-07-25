@@ -2,70 +2,42 @@
     "server": {
         "protocol": "tcp",
         "host": "0.0.0.0",
-        "port": 7580,
-        "ipv6": false,
-        "timeout_seconds": 300
+        "port": 7580
     },
-    "server_commands": [
-        {
-            "name": "Get Version & Status",
-            "command": "getver;getstatus"
-        },
-        {
-            "name": "Reboot Device",
-            "command": "cpureset"
-        }
-    ],
     "tls": {
         "enabled": false,
-        "root_cert_path": "root.pem",
-        "key_path": "ca.key"
-    },
-    "logging": {
-        "log_to_file": true,
-        "log_file_name": "server_main.log",
-        "level": "INFO"
+        "root_cert_path": "",
+        "key_path": ""
     },
     "device_management": {
         "database_file": "devices.db"
     },
-    "features": {
-        "beltrans_mode": false
-    },
-    "file_transfer": {
-        "mode": "TM25",
-        "file_path": "C:\\gps_fota\\MT3333_fw.bin",
-        "filename": "MT3333_FW_5_1_9.bin"
-    },
-    "gprs_sender": {
-        "enabled": false,
-        "command": "READTAC 356307048061781,banga,,,212.59.13.226,7086",
-        "period_seconds": 120
+    "logging": {
+        "mode": "daily",
+        "path": "persistent_log.log"
     },
     "serial_monitor": {
-        "default_port": "COM1",
-        "default_baudrate": 115200,
         "last_used_port": "COM3",
         "last_used_baudrate": 115200,
+        "auto_scroll_enabled": false,
+        "command_history": [
+            ".reset",
+            ".shrec",
+            "@modem_simul:+CGEV: NW DETACH"
+        ],
         "predefined_commands": [
             {
-                "name": "Device Status Check",
-                "command": ".info"
-            },
-            {
-                "name": "Reboot Device",
-                "command": ".reset"
-            },
-            {
-                "name": "High Prio Recs",
+                "name": "high prio",
                 "command": ".shrec"
+            },
+            {
+                "name": "simul mod",
+                "command": "@modem_simul:+CGEV: NW DETACH"
+            },
+            {
+                "name": "Reset",
+                "command": ".reset"
             }
-        ],
-        "command_history": [
-            ".shrec",
-            ".info",
-            "getstatus",
-            "getgps"
         ]
     }
 }

@@ -25,6 +25,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Make sure numpy is installed (required by pandas and folium)
+          pip install numpy
+          # Install pyinstaller specifically to ensure compatibility
+          pip install pyinstaller==6.3.0
 
       # STEP 1: Download UPX for compression
       - name: Download UPX
@@ -33,16 +37,51 @@ jobs:
           Expand-Archive -Path "upx.zip" -DestinationPath "upx"
           echo "$PWD/upx/upx-4.2.4-win64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      # STEP 2: Build executable using the .spec file
-      - name: Build executable with PyInstaller
-        run: pyinstaller aterminal.spec --noconfirm
+      # STEP 2: Clean up any previous builds
+      - name: Clean build directories
+        run: |
+          if (Test-Path "build") { Remove-Item -Recurse -Force build }
+          if (Test-Path "dist") { Remove-Item -Recurse -Force dist }
 
-      # STEP 3: Create a GitHub Release and upload the .exe
+      # STEP 3: Build executable using the updated .spec file
+      - name: Build executable with PyInstaller
+        run: pyinstaller aterminal.spec --noconfirm --clean
+
+      # STEP 4: Verify the build was successful
+      - name: Verify build output
+        run: |
+          if (Test-Path "dist/aterminal.exe") {
+            Write-Host "Build successful - EXE file created"
+          } else {
+            Write-Error "Build failed - EXE file not found"
+            exit 1
+          }
+
+      # STEP 5: Create a ZIP archive for distribution
+      - name: Create ZIP archive
+        run: |
+          Compress-Archive -Path "dist/aterminal.exe" -DestinationPath "dist/Teltonika_Device_Server.zip"
+
+      # STEP 6: Create a GitHub Release and upload the .exe and .zip
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # This creates a draft release. Remove "draft: true" to publish automatically.
           draft: false
-          # The body of the release. You can use this to write release notes.
-          body: "Official release of the Teltonika Toolkit. Download the .exe below."
-          files: dist/aterminal/aterminal.exe
+          body: |
+            # Teltonika Device Server v2.0
+            
+            This release includes the latest version of the Teltonika Device Server application.
+            
+            ## Installation
+            
+            1. Download the ZIP file below
+            2. Extract the contents
+            3. Run `aterminal.exe`
+            
+            ## Notes
+            
+            - Make sure config.json is in the same directory as the executable
+            - Requires Windows 10/11
+          files: |
+            dist/aterminal.exe
+            dist/Teltonika_Device_Server.zip

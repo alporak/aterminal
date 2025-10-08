@@ -74,6 +74,10 @@ class ConfigManager:
                     { "name": "Get Info", "command": "getinfo" },
                     { "name": "Get Status", "command": "getstatus" }
                 ]
+            },
+            "appearance": {
+                "theme": "system",  # Options: "light", "dark", "system"
+                "custom_styles": ""
             }
         }
         self.save_config()

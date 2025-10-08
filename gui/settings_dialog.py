@@ -58,10 +58,21 @@ class SettingsDialog(QDialog):
         log_layout.addRow("Log Mode:", self.log_mode_combo)
         log_layout.addRow("Persistent Log File:", path_layout)
         
+        # --- Appearance Settings Group ---
+        appearance_group = QGroupBox("Appearance")
+        appearance_layout = QFormLayout(appearance_group)
+        
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["system", "light", "dark"])
+        self.theme_combo.setCurrentText(config.get('appearance.theme', 'system'))
+        
+        appearance_layout.addRow("Theme:", self.theme_combo)
+        
         # Add groups to the main layout
         layout.addWidget(server_group)
         layout.addWidget(tls_group)
         layout.addWidget(log_group)
+        layout.addWidget(appearance_group)
 
         # --- Buttons ---
         button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -113,6 +124,11 @@ class SettingsDialog(QDialog):
             config.settings['logging'] = {}
         config.settings['logging']['mode'] = self.log_mode_combo.currentText()
         config.settings['logging']['path'] = self.log_path_input.text()
+        
+        # Save appearance settings
+        if 'appearance' not in config.settings:
+            config.settings['appearance'] = {}
+        config.settings['appearance']['theme'] = self.theme_combo.currentText()
 
         config.save_config()
         self.accept()

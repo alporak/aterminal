@@ -8,12 +8,20 @@ import ast
 import folium
 import re
 
+# --- Log Colors (Matches serial_monitor.py) ---
+COLOR_RX = "#D4D4D4"     # Default text color
+COLOR_TX = "#87CEFA"     # Light blue for transmitted data
+COLOR_INFO = "#00FF7F"   # Green for info messages
+COLOR_WARN = "#FFA500"   # Orange for warnings
+COLOR_ERROR = "#FF4500"  # Red for errors
+COLOR_LOG = "#ADD8E6"    # Light blue for log entries
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QListWidget, QListWidgetItem, QLineEdit, QStatusBar, QTabWidget,
     QMessageBox, QFileDialog, QSplitter, QInputDialog, QMenu, QCheckBox, QLabel
 )
-from PySide6.QtGui import QColor, QAction, QTextCursor, QKeySequence, QTextDocument
+from PySide6.QtGui import QColor, QAction, QTextCursor, QKeySequence, QTextDocument, QFont
 from PySide6.QtCore import Qt, Slot, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings
@@ -67,6 +75,9 @@ class MainWindow(QMainWindow):
         log_layout.addLayout(log_controls_layout)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        # Apply the same style as the serial monitor
+        self.log_view.setFont(QFont("Consolas", 10))
+        self.log_view.setStyleSheet("background-color: #1E1E1E; border: 1px solid #444; color: #D4D4D4;")
         log_layout.addWidget(self.log_view)
         self.server_search_widget = QWidget()
         search_layout = QHBoxLayout(self.server_search_widget)
@@ -210,7 +221,15 @@ class MainWindow(QMainWindow):
         if self.server_log_file and not self.server_log_file.closed:
             self.server_log_file.write(f'[{gtime()}] [{level.upper()}] {message}\n'); self.server_log_file.flush()
         scroll_bar = self.log_view.verticalScrollBar(); is_at_bottom = scroll_bar.value() == scroll_bar.maximum()
-        color_map = {"info": "blue", "warn": "orange", "error": "red", "data": "#800080"}; color = color_map.get(level, "black")
+        # Use the color constants defined at the top of the file
+        color_map = {
+            "info": COLOR_INFO,
+            "warn": COLOR_WARN,
+            "error": COLOR_ERROR,
+            "data": COLOR_TX,
+            "rx": COLOR_RX
+        }
+        color = color_map.get(level, COLOR_RX)  # Default to RX color if level not found
         self.log_view.moveCursor(QTextCursor.End); self.log_view.insertHtml(f'<font color="{color}">[{gtime()}] {message}</font><br>')
         if self.server_log_auto_scroll_check.isChecked() or is_at_bottom: scroll_bar.setValue(scroll_bar.maximum())
 
@@ -286,7 +305,13 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         dialog = SettingsDialog(self)
-        if dialog.exec(): self.log("Settings updated. Please restart the server for all changes to take effect.", "warn")
+        if dialog.exec():
+            self.log("Settings updated. Please restart the server for all changes to take effect.", "warn")
+            
+            # Reapply theme if settings changed
+            from core.theme_manager import ThemeManager
+            ThemeManager.apply_theme(QApplication.instance())
+            self.log("Theme settings applied.", "info")
 
     def open_device_menu(self, position):
         item = self.device_list_widget.itemAt(position);

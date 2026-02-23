@@ -1,0 +1,8 @@
+[submodule "jira-time-tracker"]
+	path = jira-time-tracker
+	url = https://gps-gitlab.teltonika.lt/fleet/tools/jira-time-tracker.git
+	branch = main
+[submodule "easy-catcher"]
+	path = easy-catcher
+	url = git@gps-gitlab.teltonika.lt:fleet/tools/easy-catcher.git
+	branch = master

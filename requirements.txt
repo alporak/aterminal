@@ -1,0 +1,10 @@
+streamlit
+folium
+streamlit-folium
+pyyaml
+requests
+tqdm
+pandas
+plotly
+pystray
+Pillow

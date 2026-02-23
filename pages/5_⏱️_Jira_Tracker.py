@@ -176,32 +176,41 @@ def _render_ticket_directory_section():
         key="ticket_dir_sel",
         label_visibility="collapsed",
     )
+    
+    ticket_key = assigned[selected_idx]["key"]
 
-    if st.button("📂 Open Ticket Directory", key="open_ticket_dir_btn", use_container_width=True):
-        ticket_key = assigned[selected_idx]["key"]
-
-        existing = _find_ticket_folder(tickets_folder, ticket_key)
-        if existing:
-            _open_in_explorer(existing)
-            st.success(f"Opened: `{existing}`")
-        else:
-            # Download attachments then open
-            if not email or not token:
-                st.error("Jira credentials not configured. Set them in the sidebar.")
-                return
-
-            dest = os.path.join(tickets_folder, ticket_key)
-            with st.spinner(f"Downloading attachments for {ticket_key}..."):
-                ok, msg = _download_attachments(email, token, ticket_key, dest)
-
-            if ok:
-                st.success(msg)
-                if os.path.isdir(dest):
-                    _open_in_explorer(dest)
-                else:
-                    st.info("No files were downloaded; folder was not created.")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📂 Open Ticket Directory", key="open_ticket_dir_btn", use_container_width=True):
+            existing = _find_ticket_folder(tickets_folder, ticket_key)
+            if existing:
+                _open_in_explorer(existing)
+                st.success(f"Opened: `{existing}`")
             else:
-                st.error(f"Download failed: {msg}")
+                # Download attachments then open
+                if not email or not token:
+                    st.error("Jira credentials not configured. Set them in the sidebar.")
+                    return
+
+                dest = os.path.join(tickets_folder, ticket_key)
+                with st.spinner(f"Downloading attachments for {ticket_key}..."):
+                    ok, msg = _download_attachments(email, token, ticket_key, dest)
+
+                if ok:
+                    st.success(msg)
+                    if os.path.isdir(dest):
+                        _open_in_explorer(dest)
+                    else:
+                        st.info("No files were downloaded; folder was not created.")
+                else:
+                    st.error(f"Download failed: {msg}")
+
+    with col2:
+        st.link_button(
+            "🌐 Open Jira Ticket",
+            f"https://{JIRA_DOMAIN}/browse/{ticket_key}",
+            use_container_width=True,
+        )
 
 
 # Inject sidebar config + render the ticket directory section

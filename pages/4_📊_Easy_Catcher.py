@@ -51,22 +51,8 @@ def load_toolkit_settings():
         return default_settings
 
 def import_easy_catcher_processor():
-    easy_catcher_path = os.path.join(ROOT_DIR, 'easy-catcher', 'easy_catcher.py')
-    if not os.path.exists(easy_catcher_path):
-        raise FileNotFoundError(f"Easy Catcher module not found: {easy_catcher_path}")
-
-    easy_catcher_dir = os.path.dirname(easy_catcher_path)
-    if easy_catcher_dir not in sys.path:
-        sys.path.insert(0, easy_catcher_dir)
-
-    spec = importlib.util.spec_from_file_location('easy_catcher_module', easy_catcher_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if not hasattr(module, 'process_dumps'):
-        raise AttributeError("process_dumps function not found in easy_catcher.py")
-
-    return module.process_dumps
+    from modules.easy_catcher_adapter import process_dumps
+    return process_dumps
 
 def store_parsed_data(data_points, events, structured_logs, file_name):
     st.session_state['data_points'] = data_points

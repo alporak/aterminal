@@ -48,7 +48,7 @@ class StreamlitTrayApp:
         return image
     
     def start_streamlit(self):
-        """Start the Streamlit server"""
+        """Start the Streamlit server (multi-page toolkit)"""
         if self.process is None or self.process.poll() is not None:
             print("Starting Streamlit...")
             self.process = subprocess.Popen(

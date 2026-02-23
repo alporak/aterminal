@@ -42,13 +42,30 @@ def load_toolkit_settings():
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             settings = json.load(f)
+            # Ensure paths are absolute if they look relative
+            c_path = settings.get('catcher_path', default_settings['catcher_path'])
+            if not os.path.isabs(c_path): c_path = os.path.join(ROOT_DIR, c_path)
+            
+            t_path = settings.get('clg2txt_path', default_settings['clg2txt_path'])
+            if not os.path.isabs(t_path): t_path = os.path.join(ROOT_DIR, t_path)
+
             return {
-                'catcher_path': settings.get('catcher_path', default_settings['catcher_path']),
-                'clg2txt_path': settings.get('clg2txt_path', default_settings['clg2txt_path']),
+                'catcher_path': c_path,
+                'clg2txt_path': t_path,
                 'db_path': settings.get('db_path', default_settings['db_path'])
             }
     except Exception:
         return default_settings
+
+def save_toolkit_settings(settings):
+    config_path = os.path.join(ROOT_DIR, 'toolkit_settings.json')
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Failed to save settings: {e}")
+        return False
 
 def import_easy_catcher_processor():
     from modules.easy_catcher_adapter import process_dumps
@@ -103,6 +120,16 @@ if not DEPENDENCIES_OK:
 with st.sidebar:
     st.header("⚙️ Settings")
     
+    with st.expander("🔧 Catcher Configuration", expanded=False):
+        current_settings = load_toolkit_settings()
+        new_db_path = st.text_input("Catcher Database Path (Release Vault)", value=current_settings.get('db_path', ''))
+        
+        if new_db_path != current_settings.get('db_path', ''):
+            current_settings['db_path'] = new_db_path
+            if save_toolkit_settings(current_settings):
+                st.success("Settings saved!")
+                st.rerun()
+
     st.subheader("Map Options")
     auto_play = st.checkbox("Auto-play timeline", value=False)
     show_path = st.checkbox("Show full path", value=True)
@@ -209,12 +236,21 @@ with tab1:
                             'DB_PATH': toolkit_settings['db_path']
                         }
 
+                        
+                        st.info("Parsing dumps... detailed logs below:")
+                        log_container = st.empty()
                         process_logs = []
 
                         def _log_cb(message):
                             process_logs.append(str(message))
+                            # Show last 15 lines to avoid UI flickering/lag
+                            log_container.code('\n'.join(process_logs[-15:]), language='text')
 
                         output_log_path = PROCESS_DUMPS(process_root, tool_paths, log_cb=_log_cb)
+                        
+                        # Clear the live log container after processing is done (optional, but cleaner)
+                        log_container.empty()
+
 
                         if not output_log_path or not os.path.exists(output_log_path):
                             st.session_state['easy_catcher_process_logs'] = process_logs

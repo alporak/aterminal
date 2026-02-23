@@ -30,16 +30,6 @@ if not os.path.exists(JIRA_APP):
 if JIRA_DIR not in sys.path:
     sys.path.insert(0, JIRA_DIR)
 
-# Read and compile the submodule source
-with open(JIRA_APP, "r", encoding="utf-8") as _f:
-    _source = _f.read()
-
-_code = compile(_source, JIRA_APP, "exec")
-
-# Execute in a clean namespace.  Setting __file__ to the submodule path
-# ensures _APP_DIR / CONFIG_FILE / CACHE_FILE resolve to jira-time-tracker/.
-exec(_code, {"__file__": JIRA_APP, "__name__": "__main__"})
-
 
 # ═════════════════════════════════════════════════════════════════════════
 #  Open Ticket Directory – utility added by the toolkit wrapper
@@ -217,3 +207,13 @@ def _render_ticket_directory_section():
 # Inject sidebar config + render the ticket directory section
 _render_tickets_folder_sidebar()
 _render_ticket_directory_section()
+
+# Read and compile the submodule source
+with open(JIRA_APP, "r", encoding="utf-8") as _f:
+    _source = _f.read()
+
+_code = compile(_source, JIRA_APP, "exec")
+
+# Execute in a clean namespace.  Setting __file__ to the submodule path
+# ensures _APP_DIR / CONFIG_FILE / CACHE_FILE resolve to jira-time-tracker/.
+exec(_code, {"__file__": JIRA_APP, "__name__": "__main__"})

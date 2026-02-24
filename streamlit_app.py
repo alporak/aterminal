@@ -30,11 +30,12 @@ with col1:
     
     st.markdown("")
     
-    st.subheader("📟 AT Command Parser")
-    st.write("Extract and analyze modem AT commands from device logs")
-    st.write("- Filter specific modem tags")
-    st.write("- Clean log output")
-    st.write("- Command/response analysis")
+    st.subheader("� Log Parser")
+    st.write("Combined AT parser, signal analyzer, and device state tracker")
+    st.write("- AT command / response flow")
+    st.write("- GSM signal, operator, network tracking")
+    st.write("- State timeline: sleep, trip, record sending")
+    st.write("- GPS route visualization")
 
 with col2:
     st.subheader("🔌 COM Port Unlocker")
@@ -42,14 +43,6 @@ with col2:
     st.write("- Scan for port locks")
     st.write("- Process identification")
     st.write("- Force unlock capability")
-    
-    st.markdown("")
-    
-    st.subheader("📊 Easy Catcher")
-    st.write("Catcher log analyzer and GPS visualizer")
-    st.write("- Parse Catcher logs")
-    st.write("- GPS timeline visualization")
-    st.write("- Event detection and mapping")
     
     st.markdown("")
     
@@ -63,21 +56,18 @@ st.markdown("---")
 
 # Quick links
 st.markdown("### 🚀 Quick Start")
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.info("**GPS Server**\n\nStart receiving GPS data from Teltonika devices over TCP/UDP.")
 
 with col2:
-    st.info("**AT Parser**\n\nUpload device logs to extract modem communication.")
+    st.info("**Log Parser**\n\nUpload logs to analyze AT commands, signal, and device states.")
 
 with col3:
     st.info("**COM Unlocker**\n\nFree up locked COM ports for development.")
 
 with col4:
-    st.info("**Easy Catcher**\n\nAnalyze Catcher logs with GPS visualization.")
-
-with col5:
     st.info("**Jira Tracker**\n\nView and log your Jira worklogs.")
 
 st.markdown("---")

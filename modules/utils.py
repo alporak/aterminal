@@ -1,10 +1,29 @@
 import re
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import folium
 from folium.plugins import TimestampedGeoJson
 from datetime import datetime
 from . import gps_codes
+
+# === Modem / Network State Lookups ===
+CREG_STATES = {
+    0: 'Not Registered', 1: 'Home', 2: 'Searching',
+    3: 'Denied', 4: 'Unknown', 5: 'Roaming'
+}
+NETWORK_ACT = {
+    0: 'GSM', 2: '3G', 3: 'GSM/EGPRS', 4: 'HSDPA',
+    5: 'HSUPA', 6: 'HSPA+', 7: 'LTE', 8: 'Cat-M1', 9: 'Cat-NB1'
+}
+REC_SEND_STATES = {
+    0: 'Idle', 1: 'Check Recs', 2: 'Check GPRS', 3: 'Check Link',
+    4: 'IMEI Handshake', 5: 'Sending', 6: 'Continue', 7: 'Flush',
+    8: 'Error/Finish', 9: 'Close GPRS', 10: 'Done', 11: 'GPS Special',
+    12: 'Check FIFO', 13: 'WDT', 14: 'Push Config', 15: 'Push Wait', 16: 'MQTT Init'
+}
+REC_SEND_ACTIVE = {4, 5, 6, 7, 12, 16}
 
 def ddm_to_dd(raw_val, direction):
     """ Converts NMEA degrees/minutes to decimal degrees. """
@@ -31,6 +50,10 @@ def parse_log(content_str):
     data_points = []
     events = []
     structured_logs = []
+    modem_info = {
+        'signal_readings': [],
+        'at_commands': [],
+    }
     
     # --- STRUCTURE REGEX ---
     # Matches: LineNum? SysTime Type Timestamp Date Module, Level Message
@@ -89,13 +112,36 @@ def parse_log(content_str):
     rx_sleep_wakeup = re.compile(r'\[SLEEP\]\s+WakeUp\s+from\s+sleep\s+mode\s+to\s+send\s+data!')
     rx_sleep_warning = re.compile(r'\[SLEEP\]\s+WARNING\s+@.*?:(Sleep:\d+),\s+not\s+allowed!\s+Reason:(.*)')
 
+    # 8. Modem / GSM / Network / Record Sending
+    rx_at_cmd = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[ATCMD\]\s+(.*)')
+    rx_at_rsp = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[AT\.RSP\]\s+(.*)')
+    rx_csq_val = re.compile(r'\+CSQ:\s*(\d+),\s*(\d+)')
+    rx_qcsq_val = re.compile(r'\+QCSQ:\s*"?(\w+)"?,\s*([-\d]+)(?:,\s*([-\d]+))?(?:,\s*([-\d]+))?(?:,\s*([-\d.]+))?')
+    rx_cops_val = re.compile(r'\+COPS:\s*\d+,\s*\d+,\s*"([^"]+)"(?:,\s*(\d+))?')
+    rx_creg_val = re.compile(r'\+C(?:E)?REG:\s*(?:\d+,\s*)?(\d+)(?:,\s*"([^"]*)")?(?:,\s*"([^"]*)")?(?:,\s*(\d+))?')
+    rx_rec_send = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?(\d{1,2})\s*=>\s*(\d{1,2})')
+    rx_gprs_ev = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[GPRS\.CMD\]\s+(.*)')
+    rx_modem_change = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[MODEM\].*?[Ss]tate.*?changed.*?(\w+)\s*->\s*(\w+)')
+    rx_status_operator = re.compile(r'GSM Operator\s*:\s*(\d+)')
+    rx_status_csq = re.compile(r'CSQ \(rssi\)\s*:\s*(\d+)')
+    rx_status_rsrp = re.compile(r'QCSQ \(rsrp\)\s*:\s*([-\d]+)')
+    rx_status_sinr = re.compile(r'QCSQ \(sinr\)\s*:\s*([-\d.]+)')
+    rx_status_rsrq = re.compile(r'QCSQ \(rsrq\)\s*:\s*([-\d.]+)')
+    rx_status_network = re.compile(r'Network Type\s*:\s*\d+/(\w+)')
+    rx_status_band = re.compile(r'Current LTE BAND\s*:\s*(\d+)')
+    rx_raw_tag = re.compile(r'-\[(.*?)\]\s+(.*)')
+
     # State Tracking
     current_ignition = False
     current_movement = False
     current_trip_state = None
     ignition_threshold = 13000 # 13V threshold if physical detection fails
     last_fix_state = -1
-    
+    current_operator = None
+    current_network_type = None
+    current_creg_state = -1
+    _status_snapshot = {}
+
     # Default date
     current_date_str = datetime.now().strftime('%Y/%m/%d')
     
@@ -492,10 +538,188 @@ def parse_log(content_str):
                 'Log': line.strip()
             })
 
+        # 8. AT Commands & Responses
+        match_at_cmd = rx_at_cmd.search(line)
+        if match_at_cmd:
+            ts_ac, cmd = match_at_cmd.groups()
+            modem_info['at_commands'].append({
+                'Timestamp': resolve_ts(line, ts_ac), 'Direction': 'CMD',
+                'Content': cmd.strip().strip('"'), 'LineNum': i + 1
+            })
+
+        match_at_rsp = rx_at_rsp.search(line)
+        if match_at_rsp:
+            ts_ar, rsp = match_at_rsp.groups()
+            rsp = rsp.strip().strip('"')
+            modem_info['at_commands'].append({
+                'Timestamp': resolve_ts(line, ts_ar), 'Direction': 'RSP',
+                'Content': rsp, 'LineNum': i + 1
+            })
+            # Extract signal from +CSQ
+            m_csq = rx_csq_val.search(rsp)
+            if m_csq:
+                csq = int(m_csq.group(1))
+                if csq < 99:
+                    modem_info['signal_readings'].append({
+                        'Timestamp': resolve_ts(line, ts_ar), 'CSQ': csq,
+                        'RSSI_dBm': -113 + (csq * 2), 'RSRP_dBm': None,
+                        'SINR_dB': None, 'RSRQ_dB': None, 'Network': current_network_type
+                    })
+            # Extract signal from +QCSQ
+            m_qcsq = rx_qcsq_val.search(rsp)
+            if m_qcsq:
+                nw = m_qcsq.group(1)
+                rssi_r = int(m_qcsq.group(2)) if m_qcsq.group(2) else None
+                rsrp_r = int(m_qcsq.group(3)) if m_qcsq.group(3) else None
+                sinr_r = int(m_qcsq.group(4)) if m_qcsq.group(4) else None
+                rsrq_r = float(m_qcsq.group(5)) if m_qcsq.group(5) else None
+                modem_info['signal_readings'].append({
+                    'Timestamp': resolve_ts(line, ts_ar), 'CSQ': None,
+                    'RSSI_dBm': rssi_r, 'RSRP_dBm': rsrp_r,
+                    'SINR_dB': sinr_r, 'RSRQ_dB': rsrq_r, 'Network': nw
+                })
+            # Extract operator from +COPS
+            m_cops = rx_cops_val.search(rsp)
+            if m_cops:
+                oper = m_cops.group(1)
+                act = int(m_cops.group(2)) if m_cops.group(2) else None
+                nw_name = NETWORK_ACT.get(act, str(act)) if act is not None else current_network_type
+                if oper != current_operator:
+                    current_operator = oper
+                    current_network_type = nw_name
+                    events.append({
+                        'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
+                        'Type': 'Operator', 'Value': oper,
+                        'Details': f'Operator: {oper} ({nw_name})', 'Log': line.strip()
+                    })
+            # Extract registration from +CREG/+CEREG
+            m_creg = rx_creg_val.search(rsp)
+            if m_creg:
+                stat = int(m_creg.group(1))
+                lac = m_creg.group(2)
+                ci = m_creg.group(3)
+                act = int(m_creg.group(4)) if m_creg.group(4) else None
+                if stat != current_creg_state:
+                    current_creg_state = stat
+                    sname = CREG_STATES.get(stat, f'Unknown({stat})')
+                    nw_name = NETWORK_ACT.get(act, '') if act is not None else ''
+                    if nw_name: current_network_type = nw_name
+                    det = sname
+                    if lac: det += f' LAC:{lac}'
+                    if ci: det += f' CID:{ci}'
+                    if nw_name: det += f' [{nw_name}]'
+                    events.append({
+                        'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
+                        'Type': 'Network', 'Value': sname,
+                        'Details': det, 'Log': line.strip()
+                    })
+
+        # 9. Record Sending State Changes
+        match_rec = rx_rec_send.search(line)
+        if match_rec:
+            ts_rs, server, old_s, new_s = match_rec.groups()
+            old_si, new_si = int(old_s), int(new_s)
+            old_name = REC_SEND_STATES.get(old_si, str(old_si))
+            new_name = REC_SEND_STATES.get(new_si, str(new_si))
+            events.append({
+                'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_rs),
+                'Type': 'Record Sending', 'Value': new_name,
+                'Details': f'Server {server}: {old_name} \u2192 {new_name}',
+                'Log': line.strip()
+            })
+
+        # 10. Modem State Changes
+        match_modem = rx_modem_change.search(line)
+        if match_modem:
+            ts_mc, old_st, new_st = match_modem.groups()
+            events.append({
+                'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_mc),
+                'Type': 'Modem', 'Value': new_st,
+                'Details': f'{old_st} \u2192 {new_st}', 'Log': line.strip()
+            })
+
+        # 11. MODEM.STATUS block field extraction
+        m_op = rx_status_operator.search(line)
+        if m_op:
+            new_op = m_op.group(1)
+            # Flush previous snapshot if it has signal data
+            if _status_snapshot and ('csq' in _status_snapshot or 'rsrp_dbm' in _status_snapshot):
+                modem_info['signal_readings'].append({
+                    'Timestamp': resolve_ts(line, last_timestamp_str),
+                    'CSQ': _status_snapshot.get('csq'),
+                    'RSSI_dBm': _status_snapshot.get('rssi_dbm'),
+                    'RSRP_dBm': _status_snapshot.get('rsrp_dbm'),
+                    'SINR_dB': _status_snapshot.get('sinr_db'),
+                    'RSRQ_dB': _status_snapshot.get('rsrq_db'),
+                    'Network': _status_snapshot.get('network', current_network_type),
+                })
+            _status_snapshot = {'operator': new_op}
+            if new_op != current_operator and new_op != '0':
+                current_operator = new_op
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, last_timestamp_str),
+                    'Type': 'Operator', 'Value': new_op,
+                    'Details': f'Status Report: {new_op}', 'Log': line.strip()
+                })
+
+        m_csq_s = rx_status_csq.search(line)
+        if m_csq_s:
+            csq = int(m_csq_s.group(1))
+            _status_snapshot['csq'] = csq
+            if csq < 99: _status_snapshot['rssi_dbm'] = -113 + (csq * 2)
+        m_rsrp_s = rx_status_rsrp.search(line)
+        if m_rsrp_s: _status_snapshot['rsrp_dbm'] = int(m_rsrp_s.group(1))
+        m_sinr_s = rx_status_sinr.search(line)
+        if m_sinr_s: _status_snapshot['sinr_db'] = float(m_sinr_s.group(1))
+        m_rsrq_s = rx_status_rsrq.search(line)
+        if m_rsrq_s: _status_snapshot['rsrq_db'] = float(m_rsrq_s.group(1))
+        m_nw_s = rx_status_network.search(line)
+        if m_nw_s:
+            _status_snapshot['network'] = m_nw_s.group(1)
+            current_network_type = m_nw_s.group(1)
+        m_band_s = rx_status_band.search(line)
+        if m_band_s: _status_snapshot['band'] = int(m_band_s.group(1))
+
+        # 12. GPRS events
+        match_gprs = rx_gprs_ev.search(line)
+        if match_gprs:
+            ts_gp, msg_gp = match_gprs.groups()
+            msg_gp = msg_gp.strip()
+            if any(kw in msg_gp.lower() for kw in ['open', 'close', 'error', 'fail', 'attach', 'detach']):
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_gp),
+                    'Type': 'GPRS', 'Value': msg_gp[:30],
+                    'Details': msg_gp, 'Log': line.strip()
+                })
+
+        # 13. Raw -[TAG] format (backwards compat with non-Catcher logs)
+        if not match_at_cmd and not match_at_rsp:
+            match_raw = rx_raw_tag.search(line)
+            if match_raw:
+                raw_tag, raw_msg = match_raw.groups()
+                if raw_tag in ('ATCMD', 'MDM.QTL', 'AT.RSP', 'MODEM', 'MODEM.ST', 'MODEM.ACTION'):
+                    modem_info['at_commands'].append({
+                        'Timestamp': resolve_ts(line, last_timestamp_str),
+                        'Direction': 'CMD' if raw_tag == 'ATCMD' else 'RSP' if raw_tag == 'AT.RSP' else 'INFO',
+                        'Content': f'[{raw_tag}] {raw_msg.strip()}', 'LineNum': i + 1
+                    })
+
+    # Flush remaining MODEM.STATUS snapshot
+    if _status_snapshot and ('csq' in _status_snapshot or 'rsrp_dbm' in _status_snapshot):
+        modem_info['signal_readings'].append({
+            'Timestamp': resolve_ts('', last_timestamp_str),
+            'CSQ': _status_snapshot.get('csq'),
+            'RSSI_dBm': _status_snapshot.get('rssi_dbm'),
+            'RSRP_dBm': _status_snapshot.get('rsrp_dbm'),
+            'SINR_dB': _status_snapshot.get('sinr_db'),
+            'RSRQ_dB': _status_snapshot.get('rsrq_db'),
+            'Network': _status_snapshot.get('network', current_network_type),
+        })
+
     # Sort events by timestamp
     events.sort(key=lambda x: x.get('Timestamp', ''))
 
-    return data_points, events, structured_logs
+    return data_points, events, structured_logs, modem_info
 
 def create_map(data):
     if not data: return None
@@ -585,7 +809,12 @@ def create_timeline(events):
         'No Fix Reason': '#FF0000', # Red
         'Sleep Mode': '#4682B4',   # SteelBlue
         'Static Navigation': '#800080', # Purple
-        'Trip Status': '#8A2BE2' # BlueViolet
+        'Trip Status': '#8A2BE2', # BlueViolet
+        'Network': '#20B2AA',    # LightSeaGreen
+        'Operator': '#DAA520',   # Goldenrod
+        'Record Sending': '#DC143C', # Crimson
+        'Modem': '#708090',      # SlateGray
+        'GPRS': '#FF6347',       # Tomato
     }
 
     # Clean and convert Timestamp
@@ -647,4 +876,148 @@ def create_timeline(events):
         hovermode="x unified" # Easier comparison
     )
     
+    return fig
+
+
+def create_signal_chart(signal_readings):
+    """Create a signal strength chart from parsed signal data."""
+    if not signal_readings:
+        return None
+
+    df = pd.DataFrame(signal_readings)
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%Y/%m/%d %H:%M:%S:%f', errors='coerce')
+    df = df.dropna(subset=['Timestamp']).sort_values('Timestamp')
+    if df.empty:
+        return None
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    has_rsrp = df['RSRP_dBm'].notna().any()
+
+    # RSRP (primary metric for LTE)
+    if has_rsrp:
+        fig.add_trace(go.Scatter(
+            x=df.loc[df['RSRP_dBm'].notna(), 'Timestamp'],
+            y=df.loc[df['RSRP_dBm'].notna(), 'RSRP_dBm'],
+            mode='lines+markers', name='RSRP (dBm)',
+            line=dict(color='#1f77b4', width=2), marker=dict(size=4),
+        ), secondary_y=False)
+
+    # SINR
+    if df['SINR_dB'].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.loc[df['SINR_dB'].notna(), 'Timestamp'],
+            y=df.loc[df['SINR_dB'].notna(), 'SINR_dB'],
+            mode='lines+markers', name='SINR (dB)',
+            line=dict(color='#2ca02c', width=1, dash='dot'), marker=dict(size=3),
+        ), secondary_y=True)
+
+    # RSRQ
+    if df['RSRQ_dB'].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.loc[df['RSRQ_dB'].notna(), 'Timestamp'],
+            y=df.loc[df['RSRQ_dB'].notna(), 'RSRQ_dB'],
+            mode='lines+markers', name='RSRQ (dB)',
+            line=dict(color='#9467bd', width=1, dash='dash'), marker=dict(size=3),
+        ), secondary_y=False)
+
+    # CSQ (if no RSRP available, show on primary)
+    if df['CSQ'].notna().any():
+        fig.add_trace(go.Scatter(
+            x=df.loc[df['CSQ'].notna(), 'Timestamp'],
+            y=df.loc[df['CSQ'].notna(), 'CSQ'],
+            mode='lines+markers', name='CSQ (0-31)',
+            line=dict(color='#ff7f0e', width=2), marker=dict(size=4),
+        ), secondary_y=not has_rsrp)
+
+    fig.update_layout(
+        height=300, margin=dict(l=20, r=20, t=10, b=20),
+        legend=dict(orientation="h", y=1.15, font=dict(size=10)),
+        hovermode="x unified",
+        xaxis=dict(rangeslider=dict(visible=True, thickness=0.08)),
+    )
+    fig.update_yaxes(title_text="dBm" if has_rsrp else "CSQ", secondary_y=False)
+    fig.update_yaxes(title_text="SINR (dB)", secondary_y=True)
+
+    return fig
+
+
+def create_state_timeline(events):
+    """Create a swimlane/Gantt-style state timeline showing device state durations."""
+    if not events:
+        return None
+
+    STATE_COLORS = {
+        # Ignition
+        'ON': '#FF8C00', 'OFF': '#555555',
+        # GPS
+        'Fix Acquired': '#00CC00', 'Lost Fix': '#CC0000',
+        # Sleep
+        'Enter': '#4682B4', 'Exit': '#87CEEB', 'WakeUp Send': '#B0C4DE',
+        # Trip
+        'START': '#7B68EE', 'Moving': '#9370DB', 'Stop': '#D8BFD8', 'END': '#DDA0DD',
+        # Network
+        'Home': '#20B2AA', 'Roaming': '#FFD700', 'Searching': '#FF6347',
+        'Denied': '#DC143C', 'Not Registered': '#808080',
+        # Record Sending
+        'Idle': '#DCDCDC', 'Sending': '#DC143C', 'Check Link': '#FF8C00',
+        'Check GPRS': '#FFA500', 'IMEI Handshake': '#FF6347',
+        'Done': '#90EE90', 'Error/Finish': '#B22222', 'Check Recs': '#FFB6C1',
+        'Continue': '#E9967A', 'Flush': '#F08080', 'Close GPRS': '#CD853F',
+        # Modem
+        'READY': '#228B22', 'INIT': '#DAA520', 'UNAV': '#B22222', 'PROT': '#808080',
+    }
+
+    SWIMLANE_TYPES = ['Ignition', 'GPS State', 'Sleep Mode', 'Network',
+                      'Record Sending', 'Trip Status', 'Modem']
+
+    df_events = pd.DataFrame(events)
+    if df_events.empty:
+        return None
+
+    df_events['Timestamp'] = pd.to_datetime(
+        df_events['Timestamp'], format='%Y/%m/%d %H:%M:%S:%f', errors='coerce')
+    df_events = df_events.dropna(subset=['Timestamp']).sort_values('Timestamp')
+    if df_events.empty:
+        return None
+
+    log_end = df_events['Timestamp'].max()
+    gantt_rows = []
+
+    for stype in SWIMLANE_TYPES:
+        type_df = df_events[df_events['Type'] == stype].sort_values('Timestamp')
+        if type_df.empty:
+            continue
+
+        for idx in range(len(type_df)):
+            row = type_df.iloc[idx]
+            start = row['Timestamp']
+            end = type_df.iloc[idx + 1]['Timestamp'] if idx + 1 < len(type_df) else log_end
+            if start == end:
+                end = start + pd.Timedelta(seconds=2)
+            gantt_rows.append({
+                'Category': stype, 'Start': start, 'End': end,
+                'State': str(row['Value']),
+                'Details': row.get('Details', ''),
+            })
+
+    if not gantt_rows:
+        return None
+
+    df_gantt = pd.DataFrame(gantt_rows)
+
+    fig = px.timeline(
+        df_gantt, x_start='Start', x_end='End', y='Category', color='State',
+        color_discrete_map=STATE_COLORS,
+        hover_data={'Details': True, 'State': True, 'Category': False},
+        height=max(250, len(set(df_gantt['Category'])) * 55 + 80),
+    )
+
+    fig.update_layout(
+        margin=dict(l=20, r=20, t=10, b=20),
+        legend=dict(orientation="h", y=1.15, font=dict(size=10)),
+        xaxis=dict(rangeslider=dict(visible=True, thickness=0.08), type="date"),
+        yaxis=dict(autorange="reversed", title=None),
+        hovermode="closest",
+    )
+
     return fig

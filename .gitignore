@@ -3,3 +3,5 @@ modules/__pycache__/
 *Log*
 *config*
 toolkit_settings.json
+output/*
+.vscode/*

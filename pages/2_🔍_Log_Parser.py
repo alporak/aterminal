@@ -8,6 +8,7 @@ import gzip
 import tempfile
 import zipfile
 import shutil
+import html as _html
 import glob as glob_mod
 from pathlib import Path
 from datetime import datetime
@@ -597,40 +598,49 @@ with tab_timeline:
 
         # ── State Timeline (Gantt) ──
         st.subheader("Device State Timeline")
-        state_fig = create_state_timeline(events)
-        if state_fig:
-            st.plotly_chart(state_fig, use_container_width=True)
-        else:
-            st.caption("Not enough state transitions for a timeline.")
+        try:
+            state_fig = create_state_timeline(events)
+            if state_fig:
+                st.plotly_chart(state_fig, use_container_width=True)
+            else:
+                st.caption("Not enough state transitions for a timeline.")
+        except Exception as e:
+            st.error(f"State timeline error: {e}")
 
         # ── Signal Chart ──
         signal_readings = modem_info.get('signal_readings', [])
         if signal_readings:
             st.subheader("GSM Signal Strength")
-            sig_fig = create_signal_chart(signal_readings)
-            if sig_fig:
-                st.plotly_chart(sig_fig, use_container_width=True)
-            # Quick signal stats
-            df_sig = pd.DataFrame(signal_readings)
-            cols = st.columns(4)
-            if df_sig['RSRP_dBm'].notna().any():
-                vals = df_sig['RSRP_dBm'].dropna()
-                cols[0].metric("RSRP avg", f"{vals.mean():.0f} dBm")
-                cols[1].metric("RSRP min", f"{vals.min():.0f} dBm")
-            if df_sig['SINR_dB'].notna().any():
-                vals = df_sig['SINR_dB'].dropna()
-                cols[2].metric("SINR avg", f"{vals.mean():.1f} dB")
-            if df_sig['CSQ'].notna().any():
-                vals = df_sig['CSQ'].dropna()
-                cols[3].metric("CSQ avg", f"{vals.mean():.1f}")
+            try:
+                sig_fig = create_signal_chart(signal_readings)
+                if sig_fig:
+                    st.plotly_chart(sig_fig, use_container_width=True)
+                # Quick signal stats
+                df_sig = pd.DataFrame(signal_readings)
+                cols = st.columns(4)
+                if 'RSRP_dBm' in df_sig.columns and df_sig['RSRP_dBm'].notna().any():
+                    vals = df_sig['RSRP_dBm'].dropna()
+                    cols[0].metric("RSRP avg", f"{vals.mean():.0f} dBm")
+                    cols[1].metric("RSRP min", f"{vals.min():.0f} dBm")
+                if 'SINR_dB' in df_sig.columns and df_sig['SINR_dB'].notna().any():
+                    vals = df_sig['SINR_dB'].dropna()
+                    cols[2].metric("SINR avg", f"{vals.mean():.1f} dB")
+                if 'CSQ' in df_sig.columns and df_sig['CSQ'].notna().any():
+                    vals = df_sig['CSQ'].dropna()
+                    cols[3].metric("CSQ avg", f"{vals.mean():.1f}")
+            except Exception as e:
+                st.error(f"Signal chart error: {e}")
 
         # ── Event Scatter ──
         st.subheader("Event Scatter")
-        scatter_fig = create_timeline(events)
-        if scatter_fig:
-            st.plotly_chart(scatter_fig, use_container_width=True)
-        else:
-            st.caption("No discrete events to display.")
+        try:
+            scatter_fig = create_timeline(events)
+            if scatter_fig:
+                st.plotly_chart(scatter_fig, use_container_width=True)
+            else:
+                st.caption("No discrete events to display.")
+        except Exception as e:
+            st.error(f"Event scatter error: {e}")
 
 
 # ━━━━━━━━━━━━ TAB: Modem & Signal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -640,6 +650,69 @@ with tab_modem:
     else:
         modem_info = st.session_state['modem_info']
         events = st.session_state.get('events', [])
+
+        # ── Device Identity ──
+        dev_id = modem_info.get('device_identity', {})
+        if dev_id:
+            st.subheader("🪪 Device Identity")
+            _id_fields = [
+                ('imei', 'IMEI'), ('imsi', 'IMSI'), ('iccid', 'ICCID'),
+                ('hw_ver', 'Device Model'), ('modem_type', 'Modem Type'),
+                ('fw_version', 'FW Version'), ('fw_revision', 'FW Revision'),
+                ('bl_ver', 'Bootloader'), ('hw_mod', 'HW Mod'),
+                ('sim_status', 'SIM Status'),
+                ('network_type', 'Network Type'), ('band', 'Band'),
+                ('model', 'AT Model'), ('manufacturer', 'Manufacturer'),
+            ]
+            rows_html = []
+            for field, label in _id_fields:
+                val = dev_id.get(field)
+                if val:
+                    rows_html.append(
+                        f"<div class='id-item'><div class='id-key'>{_html.escape(label)}</div>"
+                        f"<div class='id-val'>{_html.escape(str(val))}</div></div>"
+                    )
+            if rows_html:
+                st.markdown(
+                    """
+                    <style>
+                    .id-grid {
+                        display: grid;
+                        grid-template-columns: repeat(3, minmax(0, 1fr));
+                        gap: 0.35rem 0.55rem;
+                        margin-top: 0.2rem;
+                    }
+                    .id-item {
+                        border: 1px solid rgba(128,128,128,0.28);
+                        border-radius: 6px;
+                        padding: 0.3rem 0.45rem;
+                        background: rgba(127,127,127,0.06);
+                    }
+                    .id-key {
+                        font-size: 0.68rem;
+                        opacity: 0.8;
+                        line-height: 1.1;
+                        margin-bottom: 0.15rem;
+                    }
+                    .id-val {
+                        font-size: 0.74rem;
+                        line-height: 1.2;
+                        overflow-wrap: anywhere;
+                        word-break: break-word;
+                        white-space: normal;
+                    }
+                    @media (max-width: 1200px) {
+                        .id-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div class='id-grid'>{''.join(rows_html)}</div>",
+                    unsafe_allow_html=True,
+                )
+            st.divider()
 
         # ── Quick Status ──
         st.subheader("Network Summary")
@@ -669,33 +742,111 @@ with tab_modem:
         if at_cmds:
             df_at = pd.DataFrame(at_cmds)
 
-            # Quick filter
-            at_filter = st.text_input("🔍 Filter AT commands", placeholder="CSQ, COPS, CREG, QCSQ...")
+            # Ensure classification columns exist (backwards compat)
+            if 'Category' not in df_at.columns:
+                df_at['Category'] = 'Other'
+            if 'Description' not in df_at.columns:
+                df_at['Description'] = ''
+            if 'Group' not in df_at.columns:
+                df_at['Group'] = range(len(df_at))
+
+            # ── Filters row ──
+            fc1, fc2, fc3 = st.columns(3)
+
+            with fc1:
+                at_filter = st.text_input(
+                    "🔍 Filter AT commands",
+                    placeholder="CSQ, COPS, CREG, CIMI, QNWINFO...",
+                )
+
+            with fc2:
+                all_categories = sorted(set(df_at['Category'].dropna()) - {''})
+                cat_filter = st.multiselect(
+                    "Category",
+                    options=all_categories,
+                    default=[],
+                    placeholder="All categories",
+                )
+
+            with fc3:
+                dir_filter = st.multiselect(
+                    "Direction",
+                    options=['CMD', 'RSP', 'INFO'],
+                    default=['CMD', 'RSP', 'INFO'],
+                )
+
+            # Apply filters
+            df_at_view = df_at[df_at['Direction'].isin(dir_filter)]
             if at_filter:
-                mask = df_at['Content'].str.contains(at_filter, case=False, na=False)
-                df_at = df_at[mask]
-                st.write(f"{len(df_at)} matching commands")
+                mask = df_at_view['Content'].str.contains(at_filter, case=False, na=False)
+                df_at_view = df_at_view[mask]
+            if cat_filter:
+                df_at_view = df_at_view[df_at_view['Category'].isin(cat_filter)]
 
-            # Direction filter
-            dir_filter = st.multiselect(
-                "Direction", options=['CMD', 'RSP', 'INFO'],
-                default=['CMD', 'RSP', 'INFO'])
-            df_at = df_at[df_at['Direction'].isin(dir_filter)]
+            st.write(f"{len(df_at_view)} entries shown (of {len(df_at)} total)")
 
-            st.dataframe(
-                df_at, use_container_width=True, height=500,
-                column_config={
-                    "Timestamp": st.column_config.TextColumn("Time", width="medium"),
-                    "Direction": st.column_config.TextColumn("Dir", width="small"),
-                    "Content": st.column_config.TextColumn("Content", width="large"),
-                    "LineNum": st.column_config.NumberColumn("#", width="small"),
-                }
+            # ── View mode toggle ──
+            view_mode = st.radio(
+                "View", ["Flat", "Conversation"],
+                horizontal=True, label_visibility="collapsed",
             )
+
+            if view_mode == "Flat":
+                st.dataframe(
+                    df_at_view, use_container_width=True, height=500,
+                    column_config={
+                        "Timestamp": st.column_config.TextColumn("Time", width="medium"),
+                        "Direction": st.column_config.TextColumn("Dir", width="small"),
+                        "Content": st.column_config.TextColumn("Content", width="large"),
+                        "Category": st.column_config.TextColumn("Category", width="small"),
+                        "Description": st.column_config.TextColumn("Description", width="medium"),
+                        "LineNum": st.column_config.NumberColumn("#", width="small"),
+                        "Group": None,  # hide
+                    }
+                )
+            else:
+                # Conversation view: group by TX/RX pairs
+                if 'Group' in df_at_view.columns:
+                    groups = df_at_view.groupby('Group', sort=False)
+                    conv_lines = []
+                    for gid, grp in groups:
+                        cmds = grp[grp['Direction'] == 'CMD']
+                        rsps = grp[grp['Direction'].isin(['RSP', 'INFO'])]
+                        cmd_str = ', '.join(cmds['Content'].tolist()) if not cmds.empty else ''
+                        rsp_str = ' | '.join(rsps['Content'].tolist()) if not rsps.empty else ''
+                        ts = grp['Timestamp'].iloc[0] if not grp.empty else ''
+                        cat = cmds['Category'].iloc[0] if not cmds.empty else (
+                            rsps['Category'].iloc[0] if not rsps.empty else '')
+                        desc = cmds['Description'].iloc[0] if not cmds.empty else (
+                            rsps['Description'].iloc[0] if not rsps.empty else '')
+                        conv_lines.append({
+                            'Time': ts,
+                            'Command': cmd_str,
+                            'Response': rsp_str,
+                            'Category': cat,
+                            'Description': desc,
+                        })
+                    df_conv = pd.DataFrame(conv_lines)
+                    if not df_conv.empty:
+                        st.dataframe(
+                            df_conv, use_container_width=True, height=500,
+                            column_config={
+                                "Time": st.column_config.TextColumn("Time", width="medium"),
+                                "Command": st.column_config.TextColumn("Command", width="large"),
+                                "Response": st.column_config.TextColumn("Response", width="large"),
+                                "Category": st.column_config.TextColumn("Cat", width="small"),
+                                "Description": st.column_config.TextColumn("Description", width="medium"),
+                            }
+                        )
+                    else:
+                        st.caption("No conversations to display.")
+                else:
+                    st.caption("Group data not available for conversation view.")
 
             # Download
             at_text = "\n".join(
-                f"[{r['Timestamp']}] {r['Direction']:>3} | {r['Content']}"
-                for _, r in df_at.iterrows()
+                f"[{r['Timestamp']}] {r['Direction']:>4} | {r.get('Category',''):>10} | {r['Content']}"
+                for _, r in df_at_view.iterrows()
             )
             st.download_button(
                 "💾 Download AT Log", data=at_text,
@@ -703,7 +854,7 @@ with tab_modem:
                 use_container_width=True,
             )
         else:
-            st.caption("No AT commands found. Ensure log contains [ATCMD] / [AT.RSP] tags.")
+            st.caption("No AT commands found. Ensure log contains [AT.CMD] / [AT.RSP] / [ATCMD] tags.")
 
         st.divider()
 
@@ -732,7 +883,8 @@ with tab_map:
             try:
                 map_obj = create_map(data_points)
                 if map_obj:
-                    st_folium(map_obj, width=None, height=600)
+                    st_folium(map_obj, width=None, height=600,
+                              returned_objects=[], key='main_map')
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Points", len(data_points))
                     speeds = [p['speed'] for p in data_points if p['speed'] > 0]
@@ -752,32 +904,35 @@ with tab_events:
         st.info("No data. Upload and parse logs first.")
     else:
         events = filtered_events(st.session_state['events'])
-        df_ev = pd.DataFrame(events)
+        if not events:
+            st.info("All events filtered out. Adjust sidebar filters.")
+        else:
+            df_ev = pd.DataFrame(events)
 
-        search = st.text_input("🔍 Search events", placeholder="Search...")
-        if search:
-            mask = df_ev.astype(str).apply(
-                lambda row: row.str.contains(search, case=False, na=False).any(), axis=1)
-            df_ev = df_ev[mask]
-            st.write(f"{len(df_ev)} matches")
+            search = st.text_input("🔍 Search events", placeholder="Search...")
+            if search:
+                mask = df_ev.astype(str).apply(
+                    lambda row: row.str.contains(search, case=False, na=False).any(), axis=1)
+                df_ev = df_ev[mask]
+                st.write(f"{len(df_ev)} matches")
 
-        st.dataframe(
-            df_ev, use_container_width=True, height=600,
-            column_config={
-                "Timestamp": st.column_config.TextColumn("Timestamp", width="medium"),
-                "Type": st.column_config.TextColumn("Type", width="small"),
-                "Value": st.column_config.TextColumn("Value", width="small"),
-                "Details": st.column_config.TextColumn("Details", width="large"),
-                "Log": st.column_config.TextColumn("Log Line", width="large"),
-            }
-        )
+            st.dataframe(
+                df_ev, use_container_width=True, height=600,
+                column_config={
+                    "Timestamp": st.column_config.TextColumn("Timestamp", width="medium"),
+                    "Type": st.column_config.TextColumn("Type", width="small"),
+                    "Value": st.column_config.TextColumn("Value", width="small"),
+                    "Details": st.column_config.TextColumn("Details", width="large"),
+                    "Log": st.column_config.TextColumn("Log Line", width="large"),
+                }
+            )
 
-        csv = df_ev.to_csv(index=False)
-        st.download_button(
-            "💾 Download Events CSV", data=csv,
-            file_name=f"events_{st.session_state.get('file_name', 'export')}.csv",
-            mime="text/csv", use_container_width=True,
-        )
+            csv = df_ev.to_csv(index=False)
+            st.download_button(
+                "💾 Download Events CSV", data=csv,
+                file_name=f"events_{st.session_state.get('file_name', 'export')}.csv",
+                mime="text/csv", use_container_width=True,
+            )
 
 
 # ━━━━━━━━━━━━ TAB: Raw Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

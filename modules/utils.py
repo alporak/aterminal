@@ -25,6 +25,195 @@ REC_SEND_STATES = {
 }
 REC_SEND_ACTIVE = {4, 5, 6, 7, 12, 16}
 
+AT_COMMAND_INFO = {
+    # Basic / Init
+    'ATE0': ('Init', 'Disable Echo'),
+    'ATE1': ('Init', 'Enable Echo'),
+    'AT': ('Basic', 'Attention'),
+    'AT+CEER': ('Status', 'Extended Error Report'),
+    'AT+QIGETERROR': ('Status', 'Quectel IP Error'),
+    # Identity
+    'AT+CGMM': ('Identity', 'Model Identification'),
+    'AT+CGMI': ('Identity', 'Manufacturer Identification'),
+    'AT+CGSN': ('Identity', 'IMEI Query'),
+    'AT+CIMI': ('Identity', 'IMSI Query'),
+    'AT+CGMR': ('Identity', 'Firmware Revision'),
+    'AT+QGMR': ('Identity', 'Quectel FW Revision'),
+    # SIM
+    'AT+CPIN': ('SIM', 'SIM PIN Status'),
+    'AT+QCCID': ('SIM', 'SIM ICCID (Quectel)'),
+    'AT+ICCID': ('SIM', 'SIM ICCID'),
+    'AT+QSIMSTAT': ('SIM', 'SIM Status Notifications'),
+    'AT+QSIMDET': ('SIM', 'SIM Detection Config'),
+    'AT+QINISTAT': ('SIM', 'Init Status Query'),
+    # Signal
+    'AT+CSQ': ('Signal', 'Signal Quality (RSSI)'),
+    'AT+QCSQ': ('Signal', 'Extended Signal Quality'),
+    'AT+CESQ': ('Signal', 'Extended Signal (3GPP)'),
+    # Network / Registration
+    'AT+CREG': ('Network', 'GSM Registration'),
+    'AT+CGREG': ('Network', 'GPRS Registration'),
+    'AT+CEREG': ('Network', 'LTE Registration'),
+    'AT+COPS': ('Network', 'Operator Selection/Query'),
+    'AT+QNWINFO': ('Network', 'Network Info (Tech/Band)'),
+    'AT+CPAS': ('Status', 'Phone Activity Status'),
+    'AT+CIND': ('Status', 'Indicator Status'),
+    # Config
+    'AT+CMGF': ('SMS', 'SMS Format (PDU/Text)'),
+    'AT+CSCS': ('Config', 'Character Set'),
+    'AT+CMEE': ('Config', 'Extended Error Reporting'),
+    'AT+CGEREP': ('Config', 'GPRS Event Reporting'),
+    'AT+CTZU': ('Config', 'Auto Timezone Update'),
+    'AT+CTZR': ('Config', 'Timezone Reporting'),
+    'AT+QURCCFG': ('Config', 'URC Port Config'),
+    'AT+IFC': ('Config', 'Flow Control'),
+    'AT+CLIP': ('Call', 'Calling Line ID'),
+    'AT+CNMI': ('SMS', 'New SMS Indication'),
+    # Power / Sleep
+    'AT+QSCLK': ('Power', 'Sleep Mode Control'),
+    'AT+CFUN': ('Power', 'Phone Functionality'),
+    'AT+QPOWD': ('Power', 'Power Down Modem'),
+    'AT+CBC': ('Power', 'Battery Charge'),
+    # GPRS / Socket (Quectel)
+    'AT+QICSGP': ('GPRS', 'APN Configuration'),
+    'AT+QIACT': ('GPRS', 'Activate PDP Context'),
+    'AT+QIDEACT': ('GPRS', 'Deactivate PDP Context'),
+    'AT+QIOPEN': ('GPRS', 'Open Socket'),
+    'AT+QICLOSE': ('GPRS', 'Close Socket'),
+    'AT+QISEND': ('GPRS', 'Send Data'),
+    'AT+QIRD': ('GPRS', 'Read Data'),
+    'AT+QIDNSGIP': ('GPRS', 'DNS Lookup'),
+    'AT+QIDNSCFG': ('GPRS', 'DNS Server Config'),
+    'AT+CGATT': ('GPRS', 'GPRS Attach/Detach'),
+    'AT+CGDCONT': ('GPRS', 'PDP Context Definition'),
+    'AT+QISTATE': ('GPRS', 'Socket State Query'),
+    'AT+QPING': ('GPRS', 'Ping'),
+    # GPRS / Socket (MeiG / non-Quectel)
+    'AT+CIPSTART': ('GPRS', 'Open Socket'),
+    'AT+CIPCLOSE': ('GPRS', 'Close Socket'),
+    'AT+CIPSEND': ('GPRS', 'Send Data'),
+    'AT+CIPSTATUS': ('GPRS', 'Socket Status'),
+    'AT+CIPRXGET': ('GPRS', 'Read Data'),
+    'AT+CIPSHUT': ('GPRS', 'Close All Connections'),
+    # Security
+    'AT+QJDCFG': ('Security', 'Jamming Detection Config'),
+    'AT+QJDR': ('Security', 'Jamming Detection Enable'),
+    # Time
+    'AT+QLTS': ('Time', 'Local Timestamp'),
+    'AT+CCLK': ('Time', 'Clock'),
+    # SMS
+    'AT+CMGL': ('SMS', 'List SMS Messages'),
+    'AT+CMGS': ('SMS', 'Send SMS'),
+    'AT+CMGD': ('SMS', 'Delete SMS'),
+    'AT+CMGR': ('SMS', 'Read SMS'),
+    # Call
+    'AT+CLCC': ('Call', 'List Current Calls'),
+    'ATH': ('Call', 'Hang Up'),
+    'ATA': ('Call', 'Answer Call'),
+    'ATD': ('Call', 'Dial'),
+    # Network Config (Quectel)
+    'AT+QCFG': ('Config', 'Quectel Configuration'),
+    'AT+EGMR': ('Config', 'IMEI Write (Engineer)'),
+    'AT+QRFTESTMODEEXIT': ('Config', 'RF Test Mode Exit'),
+}
+
+# Identity command base name → device_identity field
+_IDENTITY_CMD_MAP = {
+    'CIMI': 'imsi', 'CGSN': 'imei', 'CGMM': 'model',
+    'CGMI': 'manufacturer', 'QCCID': 'iccid', 'ICCID': 'iccid',
+    'CGMR': 'fw_revision', 'QGMR': 'fw_revision',
+}
+
+def classify_at_command(cmd_text):
+    """Classify an AT command/response and return (category, description)."""
+    if not cmd_text:
+        return ('Other', '')
+    cmd = cmd_text.strip().rstrip('\r\n\x00')
+    cmd_upper = cmd.upper()
+
+    # Result codes
+    if cmd_upper in ('OK', 'ERROR', '>', 'CONNECT', 'NO CARRIER', 'RING'):
+        return ('Result', cmd)
+    if 'SEND OK' in cmd_upper:
+        return ('Result', 'Send OK')
+    if 'SEND FAIL' in cmd_upper:
+        return ('Result', 'Send Fail')
+    if cmd_upper.startswith('+CME ERROR'):
+        return ('Error', 'CME Error')
+    if cmd_upper.startswith('+CMS ERROR'):
+        return ('Error', 'CMS Error')
+    if ',CONNECT OK' in cmd_upper:
+        return ('Result', 'Connect OK')
+    if ',CLOSED' in cmd_upper or cmd_upper == 'CLOSED':
+        return ('Result', 'Socket Closed')
+
+    # URC (unsolicited result codes)
+    if cmd_upper.startswith('+CGEV:'):
+        return ('URC', 'GPRS Event')
+    if cmd_upper.startswith('+QIURC:'):
+        return ('URC', 'Socket Event')
+    if cmd_upper.startswith('+JAMMED'):
+        return ('URC', 'Jamming Detected')
+    if cmd_upper.startswith('+OPERATIVE'):
+        return ('URC', 'Jamming Cleared')
+    if cmd_upper in ('RDY', 'POWERED DOWN', 'NORMAL POWER DOWN'):
+        return ('URC', 'Modem Lifecycle')
+
+    # Response prefixes (+XXX: ...)
+    if cmd_upper.startswith('+'):
+        prefix = cmd.split(':')[0].strip()
+        at_cmd = 'AT' + prefix
+        if at_cmd.upper() in AT_COMMAND_INFO:
+            cat, desc = AT_COMMAND_INFO[at_cmd.upper()]
+            return (cat, f'{desc} (Response)')
+        return ('Response', prefix)
+
+    # AT commands — exact lookup
+    if cmd_upper in AT_COMMAND_INFO:
+        return AT_COMMAND_INFO[cmd_upper]
+    # Without parameters (before = or ?)
+    base_cmd = re.split(r'[=?]', cmd, 1)[0].strip()
+    if base_cmd.upper() in AT_COMMAND_INFO:
+        return AT_COMMAND_INFO[base_cmd.upper()]
+    # Prefix matching for compound commands
+    for known_cmd in sorted(AT_COMMAND_INFO.keys(), key=len, reverse=True):
+        if cmd_upper.startswith(known_cmd):
+            return AT_COMMAND_INFO[known_cmd]
+
+    # Generic categorization
+    if cmd_upper.startswith('AT+QI'):
+        return ('GPRS', 'Quectel IP Command')
+    if cmd_upper.startswith('AT+CI'):
+        return ('GPRS', 'IP Command')
+    if cmd_upper.startswith('AT+Q'):
+        return ('Quectel', 'Quectel Proprietary')
+    if cmd_upper.startswith('AT+C'):
+        return ('3GPP', 'Standard AT Command')
+    if cmd_upper.startswith('AT'):
+        return ('Basic', '')
+    # Numeric-only (IMSI, IMEI etc.)
+    if cmd.replace(' ', '').replace('.', '').replace('-', '').isdigit():
+        return ('Data', 'Numeric Response')
+    # Parsed fields from [AT.RSP] (e.g. "Parsed Status: 5")
+    if any(cmd.startswith(p) for p in ('Parsed ', 'Area Code', 'Cell ID', 'Registration', 'Registered')):
+        return ('Parsed', 'Firmware Interpretation')
+    return ('Other', '')
+
+
+def _extract_at_base_cmd(cmd_text):
+    """Extract base AT command name for response correlation.
+    
+    'AT+CIMI\\r' → 'CIMI',  'AT+CREG?' → 'CREG',  'AT+QCFG="nwscanmode"' → 'QCFG'
+    """
+    cmd = cmd_text.strip().rstrip('\r\n\x00')
+    if cmd.upper().startswith('AT+'):
+        cmd = cmd[3:]
+    elif cmd.upper().startswith('AT'):
+        cmd = cmd[2:]
+    cmd = re.split(r'[=?,\s]', cmd, 1)[0]
+    return cmd.upper()
+
+
 def ddm_to_dd(raw_val, direction):
     """ Converts NMEA degrees/minutes to decimal degrees. """
     if not raw_val or '.' not in raw_val: return None
@@ -53,7 +242,9 @@ def parse_log(content_str):
     modem_info = {
         'signal_readings': [],
         'at_commands': [],
+        'device_identity': {},
     }
+    device_identity = modem_info['device_identity']
     
     # --- STRUCTURE REGEX ---
     # Matches: LineNum? SysTime Type Timestamp Date Module, Level Message
@@ -129,7 +320,31 @@ def parse_log(content_str):
     rx_status_rsrq = re.compile(r'QCSQ \(rsrq\)\s*:\s*([-\d.]+)')
     rx_status_network = re.compile(r'Network Type\s*:\s*\d+/(\w+)')
     rx_status_band = re.compile(r'Current LTE BAND\s*:\s*(\d+)')
+    rx_status_imsi = re.compile(r'IMSI\s*:\s*(\d{15})')
+    rx_status_ccid = re.compile(r'CCID\s*:\s*(\d{19,20})')
     rx_raw_tag = re.compile(r'-\[(.*?)\]\s+(.*)')
+
+    # [SYS.DIAG] block fields
+    rx_diag_imei = re.compile(r'IMEI:\s+(\d{15})')
+    rx_diag_hw_ver = re.compile(r'HW ver:\s+(\S+)')
+    rx_diag_hw_mod = re.compile(r'HW mod:\s+(\S+)')
+    rx_diag_code_ver = re.compile(r'Code Version:(\S+)')
+    rx_diag_code_rev = re.compile(r'Code Rev:(\d+)')
+    rx_diag_bl_ver = re.compile(r'BL ver:\s+(\S+)')
+    # Modem type from FMBS payload (e.g. SLM320PE_TK_V51_U09, BG96...)
+    rx_modem_fw = re.compile(r'FMBS;\d(\w+?)(?:\x00|ENDS|\s)')
+    # Modem type from AT+CGMR/QGMR response or log lines
+    rx_modem_type_line = re.compile(r'Modem(?:\s+(?:type|model|name))?\s*:\s*(\S+)', re.IGNORECASE)
+
+    # Catcher AT dump format  (|[AT.CMD] Transmit/Received AT:| ASCII:...)
+    rx_at_catcher_ascii = re.compile(
+        r'\|\[AT\.CMD\]\s+(Transmit|Received)\s+AT:\|\s+ASCII:(.*)')
+    rx_at_catcher_header = re.compile(
+        r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[AT\.CMD\]\s+(Transmit|Received)\s+AT:')
+    rx_qnwinfo_val = re.compile(
+        r'\+QNWINFO:\s*"?([^"\s,]+)"?,\s*"?([^"\s,]+)"?,\s*"?([^"\s,]+)"?')
+    rx_cipstatus_val = re.compile(
+        r'\+CIPSTATUS:(\d+),(\d+),(\w+),([^,]+),(\d+),(\w+)')
 
     # State Tracking
     current_ignition = False
@@ -141,6 +356,11 @@ def parse_log(content_str):
     current_network_type = None
     current_creg_state = -1
     _status_snapshot = {}
+
+    # AT command tracking for Catcher format
+    _last_at_cmd_sent = ''
+    _last_at_cmd_base = ''   # e.g. 'CIMI', 'CREG', 'CSQ'
+    _at_group_counter = 0    # groups TX/RX pairs
 
     # Default date
     current_date_str = datetime.now().strftime('%Y/%m/%d')
@@ -538,22 +758,35 @@ def parse_log(content_str):
                 'Log': line.strip()
             })
 
-        # 8. AT Commands & Responses
+        # 8. AT Commands & Responses (console-trace format: [ATCMD] / [AT.RSP])
         match_at_cmd = rx_at_cmd.search(line)
         if match_at_cmd:
             ts_ac, cmd = match_at_cmd.groups()
+            cmd_clean = cmd.strip().strip('"')
+            _at_group_counter += 1
+            _last_at_cmd_sent = cmd_clean
+            _last_at_cmd_base = _extract_at_base_cmd(cmd_clean)
+            _cat, _desc = classify_at_command(cmd_clean)
             modem_info['at_commands'].append({
                 'Timestamp': resolve_ts(line, ts_ac), 'Direction': 'CMD',
-                'Content': cmd.strip().strip('"'), 'LineNum': i + 1
+                'Content': cmd_clean, 'LineNum': i + 1,
+                'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
             })
 
         match_at_rsp = rx_at_rsp.search(line)
         if match_at_rsp:
             ts_ar, rsp = match_at_rsp.groups()
             rsp = rsp.strip().strip('"')
+            # In Catcher logs [AT.RSP] carries parsed fields ("Parsed Status: 5"),
+            # in console-trace logs it carries raw responses ("+CSQ: 15,0").
+            _rsp_dir = 'RSP'
+            if not (rsp.startswith('+') or rsp.upper() in ('OK', 'ERROR', '>', 'CONNECT')):
+                _rsp_dir = 'INFO'
+            _cat, _desc = classify_at_command(rsp)
             modem_info['at_commands'].append({
-                'Timestamp': resolve_ts(line, ts_ar), 'Direction': 'RSP',
-                'Content': rsp, 'LineNum': i + 1
+                'Timestamp': resolve_ts(line, ts_ar), 'Direction': _rsp_dir,
+                'Content': rsp, 'LineNum': i + 1,
+                'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
             })
             # Extract signal from +CSQ
             m_csq = rx_csq_val.search(rsp)
@@ -612,6 +845,127 @@ def parse_log(content_str):
                         'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
                         'Type': 'Network', 'Value': sname,
                         'Details': det, 'Log': line.strip()
+                    })
+
+        # 8b. Catcher AT dump format (|[AT.CMD] ... AT:| ASCII:...)
+        #     These lines have no timestamp — use last_timestamp_str set by the
+        #     preceding header line.
+        if '|[AT.CMD]' in line:
+            _m_cat_ascii = rx_at_catcher_ascii.search(line)
+            if _m_cat_ascii:
+                _cat_dir_raw = _m_cat_ascii.group(1)   # 'Transmit' or 'Received'
+                _cat_content = _m_cat_ascii.group(2).strip().rstrip('\x00').strip()
+                if _cat_content:
+                    _cat_ts = resolve_ts(line, last_timestamp_str)
+                    if _cat_dir_raw == 'Transmit':
+                        _at_group_counter += 1
+                        _last_at_cmd_sent = _cat_content
+                        _last_at_cmd_base = _extract_at_base_cmd(_cat_content)
+                        _cat_dir = 'CMD'
+                    else:
+                        _cat_dir = 'RSP'
+                        # ── Identity extraction from plain-value responses ──
+                        if _last_at_cmd_base in _IDENTITY_CMD_MAP:
+                            _id_field = _IDENTITY_CMD_MAP[_last_at_cmd_base]
+                            if (_cat_content
+                                    and not _cat_content.startswith('+')
+                                    and _cat_content.upper() not in (
+                                        'OK', 'ERROR', '>', 'CONNECT',
+                                        'NO CARRIER', 'RING')
+                                    and not _cat_content.upper().startswith('SEND')):
+                                device_identity[_id_field] = _cat_content
+
+                        # ── SIM status from +CPIN ──
+                        if _cat_content.upper().startswith('+CPIN:'):
+                            device_identity['sim_status'] = _cat_content.split(':', 1)[1].strip()
+
+                        # ── Network info from +QNWINFO ──
+                        _m_qnw = rx_qnwinfo_val.search(_cat_content)
+                        if _m_qnw:
+                            device_identity['network_type'] = _m_qnw.group(1)
+                            device_identity['band'] = _m_qnw.group(3)
+                            current_network_type = _m_qnw.group(1)
+
+                        # ── Signal from +CSQ ──
+                        _m_csq_c = rx_csq_val.search(_cat_content)
+                        if _m_csq_c:
+                            _csq_v = int(_m_csq_c.group(1))
+                            if _csq_v < 99:
+                                modem_info['signal_readings'].append({
+                                    'Timestamp': _cat_ts, 'CSQ': _csq_v,
+                                    'RSSI_dBm': -113 + (_csq_v * 2),
+                                    'RSRP_dBm': None, 'SINR_dB': None,
+                                    'RSRQ_dB': None, 'Network': current_network_type,
+                                })
+
+                        # ── Signal from +QCSQ ──
+                        _m_qcsq_c = rx_qcsq_val.search(_cat_content)
+                        if _m_qcsq_c:
+                            _nw_c = _m_qcsq_c.group(1)
+                            modem_info['signal_readings'].append({
+                                'Timestamp': _cat_ts, 'CSQ': None,
+                                'RSSI_dBm': int(_m_qcsq_c.group(2)) if _m_qcsq_c.group(2) else None,
+                                'RSRP_dBm': int(_m_qcsq_c.group(3)) if _m_qcsq_c.group(3) else None,
+                                'SINR_dB': int(_m_qcsq_c.group(4)) if _m_qcsq_c.group(4) else None,
+                                'RSRQ_dB': float(_m_qcsq_c.group(5)) if _m_qcsq_c.group(5) else None,
+                                'Network': _nw_c,
+                            })
+
+                        # ── Operator from +COPS ──
+                        _m_cops_c = rx_cops_val.search(_cat_content)
+                        if _m_cops_c:
+                            _oper_c = _m_cops_c.group(1)
+                            _act_c = int(_m_cops_c.group(2)) if _m_cops_c.group(2) else None
+                            _nw_c = NETWORK_ACT.get(_act_c, str(_act_c)) if _act_c is not None else current_network_type
+                            if _oper_c != current_operator:
+                                current_operator = _oper_c
+                                current_network_type = _nw_c
+                                events.append({
+                                    'LineNum': i + 1, 'Timestamp': _cat_ts,
+                                    'Type': 'Operator', 'Value': _oper_c,
+                                    'Details': f'Operator: {_oper_c} ({_nw_c})',
+                                    'Log': line.strip(),
+                                })
+
+                        # ── Registration from +CREG / +CEREG / +CGREG ──
+                        _m_creg_c = rx_creg_val.search(_cat_content)
+                        if _m_creg_c:
+                            _stat_c = int(_m_creg_c.group(1))
+                            _lac_c = _m_creg_c.group(2)
+                            _ci_c = _m_creg_c.group(3)
+                            _act_c2 = int(_m_creg_c.group(4)) if _m_creg_c.group(4) else None
+                            if _stat_c != current_creg_state:
+                                current_creg_state = _stat_c
+                                _sn = CREG_STATES.get(_stat_c, f'Unknown({_stat_c})')
+                                _nwn = NETWORK_ACT.get(_act_c2, '') if _act_c2 is not None else ''
+                                if _nwn: current_network_type = _nwn
+                                _det = _sn
+                                if _lac_c: _det += f' LAC:{_lac_c}'
+                                if _ci_c: _det += f' CID:{_ci_c}'
+                                if _nwn: _det += f' [{_nwn}]'
+                                events.append({
+                                    'LineNum': i + 1, 'Timestamp': _cat_ts,
+                                    'Type': 'Network', 'Value': _sn,
+                                    'Details': _det, 'Log': line.strip(),
+                                })
+
+                        # ── Socket status from +CIPSTATUS ──
+                        _m_cip = rx_cipstatus_val.search(_cat_content)
+                        if _m_cip:
+                            device_identity.setdefault('sockets', [])
+
+                        # Clear pending command after OK/ERROR (end of transaction)
+                        if _cat_content.upper() in ('OK', 'ERROR') \
+                                or _cat_content.upper().startswith('+CME ERROR') \
+                                or _cat_content.upper().startswith('+CMS ERROR'):
+                            _last_at_cmd_base = ''
+
+                    _cat_c, _desc_c = classify_at_command(_cat_content)
+                    modem_info['at_commands'].append({
+                        'Timestamp': _cat_ts, 'Direction': _cat_dir,
+                        'Content': _cat_content, 'LineNum': i + 1,
+                        'Category': _cat_c, 'Description': _desc_c,
+                        'Group': _at_group_counter,
                     })
 
         # 9. Record Sending State Changes
@@ -680,6 +1034,42 @@ def parse_log(content_str):
         m_band_s = rx_status_band.search(line)
         if m_band_s: _status_snapshot['band'] = int(m_band_s.group(1))
 
+        # 11b. MODEM.STATUS IMSI / CCID extraction
+        m_imsi_s = rx_status_imsi.search(line)
+        if m_imsi_s and 'imsi' not in device_identity:
+            device_identity['imsi'] = m_imsi_s.group(1)
+        m_ccid_s = rx_status_ccid.search(line)
+        if m_ccid_s and 'iccid' not in device_identity:
+            device_identity['iccid'] = m_ccid_s.group(1)
+
+        # 11c. [SYS.DIAG] block identity extraction
+        m_diag_imei = rx_diag_imei.search(line)
+        if m_diag_imei:
+            device_identity['imei'] = m_diag_imei.group(1)
+        m_diag_hw = rx_diag_hw_ver.search(line)
+        if m_diag_hw and 'hw_ver' not in device_identity:
+            device_identity['hw_ver'] = m_diag_hw.group(1)
+        m_diag_hw_mod = rx_diag_hw_mod.search(line)
+        if m_diag_hw_mod and 'hw_mod' not in device_identity:
+            device_identity['hw_mod'] = m_diag_hw_mod.group(1)
+        m_diag_cv = rx_diag_code_ver.search(line)
+        if m_diag_cv and 'fw_version' not in device_identity:
+            device_identity['fw_version'] = m_diag_cv.group(1)
+        m_diag_cr = rx_diag_code_rev.search(line)
+        if m_diag_cr and 'fw_revision' not in device_identity:
+            device_identity['fw_revision'] = m_diag_cr.group(1)
+        m_diag_bl = rx_diag_bl_ver.search(line)
+        if m_diag_bl and 'bl_ver' not in device_identity:
+            device_identity['bl_ver'] = m_diag_bl.group(1)
+
+        # 11d. Modem type from FMBS payload or explicit log line
+        m_modem_fw = rx_modem_fw.search(line)
+        if m_modem_fw and 'modem_type' not in device_identity:
+            device_identity['modem_type'] = m_modem_fw.group(1)
+        m_modem_t = rx_modem_type_line.search(line)
+        if m_modem_t and 'modem_type' not in device_identity:
+            device_identity['modem_type'] = m_modem_t.group(1)
+
         # 12. GPRS events
         match_gprs = rx_gprs_ev.search(line)
         if match_gprs:
@@ -698,10 +1088,15 @@ def parse_log(content_str):
             if match_raw:
                 raw_tag, raw_msg = match_raw.groups()
                 if raw_tag in ('ATCMD', 'MDM.QTL', 'AT.RSP', 'MODEM', 'MODEM.ST', 'MODEM.ACTION'):
+                    _rt_dir = 'CMD' if raw_tag == 'ATCMD' else 'RSP' if raw_tag == 'AT.RSP' else 'INFO'
+                    _rt_content = f'[{raw_tag}] {raw_msg.strip()}'
+                    _rt_cat, _rt_desc = classify_at_command(raw_msg.strip())
                     modem_info['at_commands'].append({
                         'Timestamp': resolve_ts(line, last_timestamp_str),
-                        'Direction': 'CMD' if raw_tag == 'ATCMD' else 'RSP' if raw_tag == 'AT.RSP' else 'INFO',
-                        'Content': f'[{raw_tag}] {raw_msg.strip()}', 'LineNum': i + 1
+                        'Direction': _rt_dir, 'Content': _rt_content,
+                        'LineNum': i + 1,
+                        'Category': _rt_cat, 'Description': _rt_desc,
+                        'Group': _at_group_counter,
                     })
 
     # Flush remaining MODEM.STATUS snapshot

@@ -1,6 +1,7 @@
 """
 Teltonika GPS Server Module
-Contains protocol parsing and server logic
+Protocol-accurate implementation based on DTT v3.2.0 reference.
+Supports Codec 8, 8E, 12, 13 over TCP and UDP.
 """
 
 import socket
@@ -12,21 +13,339 @@ import select
 from collections import defaultdict
 
 
+# ─── IO element name registry ──────────────────────────────────────────────────
+# Fallback built-in names (small subset).  The full set is loaded from an Excel.
+_BUILTIN_IO_NAMES: dict[int, str] = {
+    1: "Din1", 2: "Din2", 3: "Din3", 4: "Din4",
+    9: "AnalogInput1", 10: "AnalogInput2",
+    16: "TotalOdometer", 21: "GsmSignal", 24: "Speed",
+    66: "ExternalVoltage", 67: "BatteryVoltage", 68: "BatteryCurrent",
+    69: "GnssStatus", 113: "BatteryLevel",
+    179: "Dout1", 180: "Dout2", 239: "Ignition", 240: "Movement",
+}
+
+# Mutable registry – updated at runtime by load_avl_ids_from_excel()
+IO_ELEMENT_NAMES: dict[int, str] = dict(_BUILTIN_IO_NAMES)
+
+
+def load_avl_ids_from_excel(path: str) -> tuple[dict[int, str], str | None]:
+    """Load IO element names from FMB_AVL_IDS.xlsx (MainTable sheet).
+
+    Returns (id→name dict, error_string|None).
+    The dict is keyed by column A (Property ID) with the *first* name found per ID.
+    """
+    import os
+    if not os.path.isfile(path):
+        return {}, f"File not found: {path}"
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb['MainTable']
+        names: dict[int, str] = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            avl_id = row[0]
+            prop_name = row[1]
+            if avl_id is None or prop_name is None:
+                continue
+            try:
+                avl_id = int(avl_id)
+            except (ValueError, TypeError):
+                continue
+            if avl_id not in names:
+                names[avl_id] = str(prop_name).strip()
+        wb.close()
+        return names, None
+    except Exception as e:
+        return {}, str(e)
+
+
+def refresh_io_names(path: str) -> str | None:
+    """Reload IO_ELEMENT_NAMES from Excel.  Returns error string or None."""
+    names, err = load_avl_ids_from_excel(path)
+    if err:
+        return err
+    # Merge in-place so all existing references stay valid
+    IO_ELEMENT_NAMES.clear()
+    IO_ELEMENT_NAMES.update(_BUILTIN_IO_NAMES)
+    IO_ELEMENT_NAMES.update(names)  # Excel wins over builtins
+    return None
+
+
+def io_name(io_id: int) -> str:
+    """Human-readable name for an IO element ID."""
+    return IO_ELEMENT_NAMES.get(io_id, f"IO_{io_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Hex Packet Annotator
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Color palette for annotations
+_C = {
+    'preamble': '#546E7A', 'length': '#78909C', 'codec': '#FF8F00',
+    'count': '#8E24AA', 'ack': '#2E7D32', 'crc': '#C62828',
+    'imei': '#1565C0', 'timestamp': '#F9A825', 'priority': '#E65100',
+    'lon': '#00838F', 'lat': '#00695C', 'alt': '#558B2F',
+    'angle': '#9E9D24', 'sat': '#00ACC1', 'speed': '#D84315',
+    'io_evt': '#6A1B9A', 'io_cnt': '#4A148C',
+    'cmd_type': '#00897B', 'cmd_data': '#0277BD',
+}
+
+_IO_COLORS = [
+    '#00897B', '#5E35B1', '#C0CA33', '#F4511E', '#3949AB',
+    '#43A047', '#E53935', '#1E88E5', '#8E24AA', '#FB8C00',
+    '#00ACC1', '#7CB342', '#D81B60', '#039BE5', '#FDD835',
+]
+
+
+def _annotate_avl(data: bytes, off: int, n: int, codec_id: int,
+                  count: int, sections: list, add, get_io_color) -> int:
+    """Annotate AVL records. Returns updated offset."""
+    is_8e = (codec_id == 0x8E)
+    id_sz = 2 if is_8e else 1
+    cnt_sz = 2 if is_8e else 1
+
+    def ru(size):
+        nonlocal off
+        if off + size > n:
+            raise IndexError
+        val = int.from_bytes(data[off:off + size], 'big', signed=False)
+        off += size
+        return val
+
+    try:
+        for ri in range(count):
+            p = f'R{ri + 1} '
+
+            # Timestamp (8 B)
+            ts_s = off
+            ts_ms = ru(8)
+            try:
+                dt = datetime.datetime.utcfromtimestamp(ts_ms / 1000.0)
+                tstr = dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                tstr = str(ts_ms)
+            add(ts_s, off, f'{p}Time: {tstr}', _C['timestamp'])
+
+            # Priority (1 B)
+            ps = off; prio = ru(1)
+            add(ps, off, f'{p}Priority: {prio}', _C['priority'])
+
+            # GPS (15 B)
+            g = off
+            lon = int.from_bytes(data[off:off + 4], 'big', signed=True) / 1e7; off += 4
+            lat = int.from_bytes(data[off:off + 4], 'big', signed=True) / 1e7; off += 4
+            alt = int.from_bytes(data[off:off + 2], 'big', signed=True); off += 2
+            ang = ru(2); sat = ru(1); spd = ru(2)
+            add(g, g + 4, f'{p}Lon: {lon:.7f}', _C['lon'])
+            add(g + 4, g + 8, f'{p}Lat: {lat:.7f}', _C['lat'])
+            add(g + 8, g + 10, f'{p}Alt: {alt}m', _C['alt'])
+            add(g + 10, g + 12, f'{p}Angle: {ang}°', _C['angle'])
+            add(g + 12, g + 13, f'{p}Sats: {sat}', _C['sat'])
+            add(g + 13, g + 15, f'{p}Speed: {spd}', _C['speed'])
+
+            # IO Event + Total
+            es = off; evio = ru(id_sz)
+            add(es, off, f'{p}EventIO: {io_name(evio)} ({evio})', _C['io_evt'])
+            ts2 = off; tio = ru(cnt_sz)
+            add(ts2, off, f'{p}TotalIO: {tio}', _C['io_cnt'])
+
+            # IO sections: 1B, 2B, 4B, 8B
+            for vs in [1, 2, 4, 8]:
+                cs = off; ic = ru(cnt_sz)
+                add(cs, off, f'{p}{vs}B Count: {ic}', _C['io_cnt'])
+                for _ in range(ic):
+                    ids = off; iid = ru(id_sz)
+                    vs_s = off; ival = ru(vs)
+                    c = get_io_color(iid)
+                    nm = io_name(iid)
+                    add(ids, vs_s, f'{nm} ID ({iid})', c)
+                    add(vs_s, off, f'{nm} = {ival}', c)
+
+            # NX variable-length (Codec 8E)
+            if is_8e:
+                nxs = off; nxc = ru(cnt_sz)
+                add(nxs, off, f'{p}NX Count: {nxc}', _C['io_cnt'])
+                for _ in range(nxc):
+                    ids = off; iid = ru(id_sz)
+                    ls = off; vl = ru(2)
+                    c = get_io_color(iid)
+                    nm = io_name(iid)
+                    add(ids, ls, f'{nm} ID ({iid})', c)
+                    add(ls, off, f'{nm} Len ({vl})', c)
+                    ds = off
+                    off += vl
+                    if off <= n:
+                        add(ds, off, f'{nm} Data', c)
+
+    except (IndexError, struct.error):
+        pass
+    return off
+
+
+def annotate_packet(raw_hex: str, protocol: str = 'TCP') -> list[dict]:
+    """Annotate raw hex packet with labeled byte ranges.
+
+    Returns list of dicts: {s, e, label, color}  (byte indices, exclusive end).
+    """
+    try:
+        data = bytes.fromhex(raw_hex)
+    except ValueError:
+        return [{'s': 0, 'e': len(raw_hex) // 2, 'label': 'Invalid hex', 'color': '#EF5350'}]
+
+    n = len(data)
+    if n == 0:
+        return []
+
+    sections: list[dict] = []
+
+    def add(s, e, label, color):
+        if 0 <= s < e <= n:
+            sections.append({'s': s, 'e': e, 'label': label, 'color': color})
+
+    io_color_cache: dict[int, str] = {}
+    io_idx = [0]
+
+    def get_io_color(io_id):
+        if io_id not in io_color_cache:
+            io_color_cache[io_id] = _IO_COLORS[io_idx[0] % len(_IO_COLORS)]
+            io_idx[0] += 1
+        return io_color_cache[io_id]
+
+    try:
+        # ── TCP-specific short packets ─────────────────────────────────
+        if protocol == 'TCP':
+            if n >= 17 and data[0:2] == b'\x00\x0F':
+                add(0, 2, 'IMEI Len (15)', _C['length'])
+                imei = data[2:17].decode('ascii', errors='replace')
+                add(2, 17, f'IMEI: {imei}', _C['imei'])
+                return sections
+            if n == 1 and data[0] == 0x01:
+                add(0, 1, 'IMEI Accept (0x01)', _C['ack'])
+                return sections
+            if n == 4:
+                cnt = struct.unpack('!I', data)[0]
+                if cnt < 256:
+                    add(0, 4, f'Data ACK (N={cnt})', _C['ack'])
+                    return sections
+
+        # ── UDP-specific packets ───────────────────────────────────────
+        if protocol == 'UDP':
+            if n == 7 and data[0:2] == b'\x00\x05':
+                add(0, 2, 'Resp Length', _C['length'])
+                pid = struct.unpack('<H', data[2:4])[0]
+                add(2, 4, f'PktId ({pid})', _C['imei'])
+                add(4, 5, f'NotUsable', _C['preamble'])
+                add(5, 6, f'AvlPktId', _C['count'])
+                add(6, 7, f'N={data[6]}', _C['ack'])
+                return sections
+
+            if n >= 10 and data[0:4] != b'\x00\x00\x00\x00':
+                pl = struct.unpack('!H', data[0:2])[0]
+                add(0, 2, f'Length ({pl})', _C['length'])
+                pid = struct.unpack('!H', data[2:4])[0]
+                add(2, 4, f'PktId ({pid})', _C['imei'])
+                add(4, 5, 'NotUsable', _C['preamble'])
+                add(5, 6, 'AvlPktId', _C['count'])
+                il = struct.unpack('!H', data[6:8])[0]
+                add(6, 8, f'IMEI Len ({il})', _C['length'])
+                ie = 8 + il
+                if ie <= n:
+                    imei = data[8:ie].decode('ascii', errors='replace')
+                    add(8, ie, f'IMEI: {imei}', _C['imei'])
+                off = ie
+                if off < n:
+                    cid = data[off]
+                    add(off, off + 1, f'Codec 0x{cid:02X}', _C['codec'])
+                    off += 1
+                    if off < n:
+                        c1 = data[off]
+                        add(off, off + 1, f'Count ({c1})', _C['count'])
+                        off += 1
+                        off = _annotate_avl(data, off, n, cid, c1,
+                                            sections, add, get_io_color)
+                        if off < n:
+                            add(off, off + 1, 'Count2', _C['count'])
+                            off += 1
+                if off < n:
+                    add(off, n, 'Extra', '#9E9E9E')
+                return sections
+
+        # ── Framed packet (TCP or UDP command-response wrapper) ────────
+        if n >= 12 and struct.unpack('!I', data[0:4])[0] == 0:
+            dl = struct.unpack('!I', data[4:8])[0]
+            add(0, 4, 'Preamble', _C['preamble'])
+            add(4, 8, f'DataLen ({dl})', _C['length'])
+
+            if 8 < n:
+                cid = data[8]
+                add(8, 9, f'Codec 0x{cid:02X}', _C['codec'])
+
+                if cid in (0x0C, 0x0D):
+                    off = 9
+                    if off < n:
+                        add(off, off + 1, f'Qty ({data[off]})', _C['count']); off += 1
+                    if off < n:
+                        ct = data[off]
+                        tn = {0x05: 'Command', 0x06: 'Response'}.get(ct, f'0x{ct:02X}')
+                        add(off, off + 1, tn, _C['cmd_type']); off += 1
+                    if off + 4 <= n:
+                        cl = struct.unpack('!I', data[off:off + 4])[0]
+                        add(off, off + 4, f'CmdLen ({cl})', _C['length']); off += 4
+                        ce = min(off + cl, n)
+                        if off < ce:
+                            try:
+                                txt = data[off:ce].decode('ascii', errors='replace')
+                                lbl = txt[:50] + ('…' if len(txt) > 50 else '')
+                            except Exception:
+                                lbl = 'Data'
+                            add(off, ce, lbl, _C['cmd_data']); off = ce
+                    if off < n:
+                        add(off, off + 1, f'Qty2', _C['count']); off += 1
+
+                elif cid in (0x08, 0x8E, 0x10):
+                    off = 9
+                    if off < n:
+                        c1 = data[off]
+                        add(off, off + 1, f'Count ({c1})', _C['count']); off += 1
+                        eod = min(8 + dl, n)
+                        off = _annotate_avl(data, off, eod, cid, c1,
+                                            sections, add, get_io_color)
+                        if off < eod:
+                            add(off, off + 1, 'Count2', _C['count']); off += 1
+
+            crc_s = 8 + dl
+            if crc_s + 4 <= n:
+                cv = struct.unpack('!I', data[crc_s:crc_s + 4])[0]
+                add(crc_s, crc_s + 4, f'CRC (0x{cv:04X})', _C['crc'])
+            total = 8 + dl + 4
+            if total < n:
+                add(total, n, 'Extra', '#9E9E9E')
+            return sections
+
+    except Exception:
+        pass
+
+    if not sections:
+        add(0, n, 'Raw Data', '#9E9E9E')
+    return sections
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Protocol parser
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class TeltonikaProtocol:
-    """Complete Teltonika Protocol Parser supporting all codecs"""
-    
-    # Codec Constants
-    CODEC_8 = 0x08
+    """Complete Teltonika Protocol Parser – Codec 8 / 8E / 12 / 13."""
+
+    CODEC_8  = 0x08
     CODEC_8E = 0x8E
     CODEC_12 = 0x0C
     CODEC_13 = 0x0D
-    CODEC_14 = 0x0E
     CODEC_16 = 0x10
-    CODEC_61 = 0x3D
-    
+
     @staticmethod
     def crc16(data: bytes) -> int:
-        """CRC16 calculation for Teltonika packets"""
         crc = 0
         poly = 0xA001
         for byte in data:
@@ -37,1074 +356,902 @@ class TeltonikaProtocol:
                 else:
                     crc >>= 1
         return crc
-    
+
+    # ── IMEI / ping ────────────────────────────────────────────────────────────
     @staticmethod
-    def validate_data_packet(data_payload: bytes) -> bool:
-        """Validate CRC of data packet"""
-        if len(data_payload) < 5:
-            return False
-        
-        received_crc = struct.unpack('!I', data_payload[-4:])[0]
-        calc_data = data_payload[:-4]
-        calculated_crc = TeltonikaProtocol.crc16(calc_data)
-        
-        return received_crc == calculated_crc
-    
+    def parse_imei_packet(data: bytes):
+        """Return IMEI string if *data* is valid 17-byte IMEI packet, else None."""
+        if len(data) >= 17 and data[0:2] == b'\x00\x0F':
+            return data[2:17].decode('ascii', errors='ignore')
+        return None
+
     @staticmethod
-    def parse_tcp_packet(packet: bytes) -> dict:
-        """Parse TCP packet (IMEI or Data)"""
-        result = {'type': 'unknown', 'raw': packet.hex().upper()}
-        
-        try:
-            # Check for IMEI packet (starts with 0x000F)
-            if len(packet) >= 2 and packet[0:2] == b'\x00\x0F':
-                if len(packet) == 17:  # 2 bytes length + 15 bytes IMEI
-                    imei = packet[2:17].decode('ascii')
-                    result = {
-                        'type': 'imei',
-                        'imei': imei,
-                        'raw': packet.hex().upper()
-                    }
-                return result
-            
-            # Check for Data packet
-            if len(packet) >= 12:
-                preamble = struct.unpack('!I', packet[0:4])[0]
-                data_len = struct.unpack('!I', packet[4:8])[0]
-                
-                if preamble == 0:  # Valid data packet preamble
-                    codec_id = packet[8]
-                    
-                    # Extract payload (codec to CRC-4)
-                    payload = packet[8:-4]
-                    
-                    if codec_id in [TeltonikaProtocol.CODEC_8, TeltonikaProtocol.CODEC_8E, TeltonikaProtocol.CODEC_16]:
-                        # Parse AVL data
-                        count1 = packet[9]
-                        avl_data = payload[2:]  # Skip codec and count1
-                        
-                        records = TeltonikaProtocol.decode_avl_records(codec_id, avl_data, count1)
-                        
-                        result = {
-                            'type': 'data',
-                            'codec': f'0x{codec_id:02X}',
-                            'count': count1,
-                            'records': records,
-                            'raw': packet.hex().upper()
-                        }
-                    
-                    elif codec_id == TeltonikaProtocol.CODEC_12:
-                        # Codec 12 - Commands/Responses
-                        qty = packet[9]
-                        cmd_type = packet[10]
-                        
-                        if cmd_type == 0x06:  # Response from device
-                            # Extract response data
-                            resp_len = struct.unpack('!I', packet[11:15])[0]
-                            resp_data = packet[15:15+resp_len].decode('ascii', errors='ignore')
-                            
-                            result = {
-                                'type': 'response',
-                                'codec': 'Codec12',
-                                'resp_type': cmd_type,
-                                'response': resp_data,
-                                'raw': packet.hex().upper()
-                            }
-                        else:
-                            result = {
-                                'type': 'codec12_data',
-                                'codec': 'Codec12',
-                                'raw': packet.hex().upper()
-                            }
-                    
-                    elif codec_id == TeltonikaProtocol.CODEC_14:
-                        # Codec 14
-                        result = {
-                            'type': 'codec14_data',
-                            'codec': 'Codec14',
-                            'raw': packet.hex().upper()
-                        }
-                    
-        except Exception as e:
-            result['error'] = str(e)
-        
-        return result
-    
+    def is_ping(data: bytes) -> bool:
+        return len(data) == 1 and data[0] == 0xFF
+
+    # ── TCP frame parsing ─────────────────────────────────────────────────────
     @staticmethod
-    def parse_udp_packet(packet: bytes) -> dict:
-        """Parse UDP packet"""
-        result = {'type': 'unknown', 'raw': packet.hex().upper()}
-        
-        try:
-            if len(packet) < 5:
-                return result
-            
-            # UDP Channel Header: Length(2) + PacketID(2) + NotUsed(1) + AVLPacketID(1) + IMEILen(2) + IMEI
-            pkt_len = struct.unpack('!H', packet[0:2])[0]
-            pkt_id = struct.unpack('!H', packet[2:4])[0]
-            not_used = packet[4]
-            
-            offset = 5
-            
-            # Check if this looks like AVL data
-            if offset < len(packet):
-                avl_pkt_id = packet[offset]
-                offset += 1
-                
-                # IMEI
-                if offset + 2 <= len(packet):
-                    imei_len = struct.unpack('!H', packet[offset:offset+2])[0]
-                    offset += 2
-                    
-                    if offset + imei_len <= len(packet):
-                        imei = packet[offset:offset+imei_len].decode('ascii')
-                        offset += imei_len
-                        
-                        # Codec
-                        if offset < len(packet):
-                            codec_id = packet[offset]
-                            offset += 1
-                            
-                            # Count
-                            if offset < len(packet):
-                                count = packet[offset]
-                                offset += 1
-                                
-                                # AVL Records
-                                avl_data = packet[offset:]
-                                records = TeltonikaProtocol.decode_avl_records(codec_id, avl_data, count)
-                                
-                                result = {
-                                    'type': 'data',
-                                    'udp_id': pkt_id,
-                                    'avl_id': avl_pkt_id,
-                                    'imei': imei,
-                                    'codec': f'0x{codec_id:02X}',
-                                    'count': count,
-                                    'records': records,
-                                    'raw': packet.hex().upper()
-                                }
-        except Exception as e:
-            result['error'] = str(e)
-        
-        return result
-    
+    def parse_tcp_data_packet(packet: bytes) -> dict | None:
+        """Parse a framed TCP data packet.
+
+        Returns dict with type='data' | 'response' | 'crc_error' or None.
+        """
+        if len(packet) < 12:
+            return None
+        preamble = struct.unpack('!I', packet[0:4])[0]
+        data_len = struct.unpack('!I', packet[4:8])[0]
+        if preamble != 0 or data_len == 0 or data_len > 65535:
+            return None
+        total = 8 + data_len + 4
+        if len(packet) < total:
+            return None
+
+        codec_id = packet[8]
+
+        # CRC validation
+        payload_for_crc = packet[8:8 + data_len]
+        recv_crc = struct.unpack('!I', packet[8 + data_len:total])[0]
+        calc_crc = TeltonikaProtocol.crc16(payload_for_crc)
+        if recv_crc != calc_crc:
+            return {'type': 'crc_error', 'raw': packet.hex().upper()}
+
+        # Codec 12 / 13 – command response
+        if codec_id in (TeltonikaProtocol.CODEC_12, TeltonikaProtocol.CODEC_13):
+            cmd_type = packet[10]
+            if cmd_type == 0x06:  # response
+                resp_len = struct.unpack('!I', packet[11:15])[0]
+                resp_data = packet[15:15 + resp_len].decode('ascii', errors='ignore')
+                return {'type': 'response', 'codec': codec_id,
+                        'response': resp_data, 'raw': packet.hex().upper()}
+            return {'type': 'codec12_other', 'raw': packet.hex().upper()}
+
+        # Codec 8 / 8E / 16 – AVL data
+        if codec_id in (TeltonikaProtocol.CODEC_8, TeltonikaProtocol.CODEC_8E,
+                        TeltonikaProtocol.CODEC_16):
+            count1 = packet[9]
+            avl_bytes = packet[10:8 + data_len - 1]
+            records = TeltonikaProtocol.decode_avl_records(codec_id, avl_bytes, count1)
+            return {'type': 'data', 'codec': codec_id,
+                    'codec_name': f'0x{codec_id:02X}',
+                    'count': count1, 'records': records,
+                    'raw': packet.hex().upper()}
+
+        return None
+
+    # ── UDP frame parsing ─────────────────────────────────────────────────────
     @staticmethod
-    def decode_avl_records(codec: int, data_bytes: bytes, count: int) -> list:
-        """Decode AVL records from data"""
+    def parse_udp_packet(packet: bytes) -> dict | None:
+        """Parse a UDP datagram.
+
+        Frame: Length(2) PacketId(2) NotUsable(1) AvlPacketId(1)
+               ImeiLen(2) IMEI(N) CodecId(1) Nod1(1) AVL… Nod2(1)
+
+        If preamble is 00000000 → treat as command response (Codec 12).
+        """
+        if len(packet) < 10:
+            return None
+
+        # Command response inside UDP
+        if packet[0:4] == b'\x00\x00\x00\x00':
+            return TeltonikaProtocol.parse_tcp_data_packet(packet)
+
+        pkt_len    = struct.unpack('!H', packet[0:2])[0]
+        pkt_id     = struct.unpack('!H', packet[2:4])[0]
+        not_usable = packet[4]
+        avl_pkt_id = packet[5]
+        imei_len   = struct.unpack('!H', packet[6:8])[0]
+
+        if 8 + imei_len > len(packet):
+            return None
+
+        imei = packet[8:8 + imei_len].decode('ascii', errors='ignore')
+        off = 8 + imei_len
+
+        if off + 2 > len(packet):
+            return None
+
+        codec_id = packet[off]; off += 1
+        count1   = packet[off]; off += 1
+
+        avl_bytes = packet[off:len(packet) - 1]  # up to Nod2
+        records = TeltonikaProtocol.decode_avl_records(codec_id, avl_bytes, count1)
+
+        return {
+            'type': 'data',
+            'udp_pkt_id': pkt_id,
+            'udp_not_usable': not_usable,
+            'udp_avl_pkt_id': avl_pkt_id,
+            'imei': imei,
+            'codec': codec_id,
+            'codec_name': f'0x{codec_id:02X}',
+            'count': count1,
+            'records': records,
+            'raw': packet.hex().upper(),
+        }
+
+    # ── AVL record decoding ───────────────────────────────────────────────────
+    @staticmethod
+    def decode_avl_records(codec: int, data: bytes, count: int) -> list:
         records = []
-        offset = 0
-        
+        off = 0
+        is_8e = (codec == TeltonikaProtocol.CODEC_8E)
+
+        def ru(size):
+            nonlocal off
+            if off + size > len(data):
+                raise IndexError
+            val = int.from_bytes(data[off:off + size], 'big', signed=False)
+            off += size
+            return val
+
+        def rs(size):
+            nonlocal off
+            if off + size > len(data):
+                raise IndexError
+            val = int.from_bytes(data[off:off + size], 'big', signed=True)
+            off += size
+            return val
+
         try:
-            for i in range(count):
-                if offset + 15 > len(data_bytes):
-                    break
-                
-                record = {}
-                
-                # Timestamp (8 bytes)
-                timestamp_ms = struct.unpack('!Q', data_bytes[offset:offset+8])[0]
-                offset += 8
-                dt = datetime.datetime.fromtimestamp(timestamp_ms / 1000.0)
-                record['Timestamp'] = dt.strftime('%Y-%m-%d %H:%M:%S')
-                record['Timestamp_ms'] = timestamp_ms
-                
-                # Priority (1 byte)
-                priority = data_bytes[offset]
-                offset += 1
-                record['Priority'] = priority
-                
-                # GPS Data (15 bytes)
-                lon = struct.unpack('!i', data_bytes[offset:offset+4])[0] / 10000000.0
-                offset += 4
-                lat = struct.unpack('!i', data_bytes[offset:offset+4])[0] / 10000000.0
-                offset += 4
-                alt = struct.unpack('!h', data_bytes[offset:offset+2])[0]
-                offset += 2
-                angle = struct.unpack('!H', data_bytes[offset:offset+2])[0]
-                offset += 2
-                sat = data_bytes[offset]
-                offset += 1
-                speed = struct.unpack('!H', data_bytes[offset:offset+2])[0]
-                offset += 2
-                
-                record['Longitude'] = lon
-                record['Latitude'] = lat
-                record['Altitude'] = alt
-                record['Angle'] = angle
-                record['Satellites'] = sat
-                record['Speed'] = speed
-                
-                # IO Elements
-                if offset >= len(data_bytes):
-                    records.append(record)
-                    continue
-                
-                event_id = data_bytes[offset]
-                offset += 1
-                record['Event_ID'] = event_id
-                
-                if offset >= len(data_bytes):
-                    records.append(record)
-                    continue
-                
-                total_io = data_bytes[offset]
-                offset += 1
-                record['Total_IO'] = total_io
-                
+            for _ in range(count):
+                rec = {}
+                # Timestamp 8 B (ms since epoch)
+                ts_ms = ru(8)
+                dt = datetime.datetime.utcfromtimestamp(ts_ms / 1000.0)
+                rec['Timestamp'] = dt.strftime('%Y-%m-%d %H:%M:%S')
+                rec['Timestamp_ms'] = ts_ms
+
+                # Priority 1 B
+                rec['Priority'] = ru(1)
+
+                # GPS 15 B
+                rec['Longitude']  = rs(4) / 10_000_000.0
+                rec['Latitude']   = rs(4) / 10_000_000.0
+                rec['Altitude']   = rs(2)
+                rec['Angle']      = ru(2)
+                rec['Satellites'] = ru(1)
+                rec['Speed']      = ru(2)
+
+                # IO elements
+                id_sz  = 2 if is_8e else 1
+                cnt_sz = 2 if is_8e else 1
+
+                event_io = ru(id_sz)
+                total_io = ru(cnt_sz)
+                rec['Event_IO'] = event_io
+                rec['Total_IO'] = total_io
+
                 io_data = {}
-                
-                # Helper function to read IO elements
-                def read_io_section(byte_width):
-                    nonlocal offset
-                    if offset >= len(data_bytes):
-                        return
-                    
-                    count_io = data_bytes[offset]
-                    offset += 1
-                    
-                    for _ in range(count_io):
-                        if offset >= len(data_bytes):
-                            return
-                        
-                        io_id = data_bytes[offset]
-                        offset += 1
-                        
-                        if offset + byte_width > len(data_bytes):
-                            return
-                        
-                        if byte_width == 1:
-                            val = data_bytes[offset]
-                            offset += 1
-                        elif byte_width == 2:
-                            val = struct.unpack('!H', data_bytes[offset:offset+2])[0]
-                            offset += 2
-                        elif byte_width == 4:
-                            val = struct.unpack('!I', data_bytes[offset:offset+4])[0]
-                            offset += 4
-                        elif byte_width == 8:
-                            val = struct.unpack('!Q', data_bytes[offset:offset+8])[0]
-                            offset += 8
-                        
-                        io_data[f'IO_{io_id}'] = val
-                
-                # Read 1, 2, 4, 8 byte IO elements
+
+                def read_io_section(val_size):
+                    n = ru(cnt_sz)
+                    for _ in range(n):
+                        io_id  = ru(id_sz)
+                        io_val = ru(val_size)
+                        io_data[io_id] = io_val
+
                 read_io_section(1)
                 read_io_section(2)
                 read_io_section(4)
                 read_io_section(8)
-                
-                record['IO_Data'] = io_data
-                records.append(record)
-        
-        except Exception as e:
-            pass  # Partial decode is ok
-        
-        return records
-    
-    @staticmethod
-    def build_tcp_command(cmd_text: str) -> bytes:
-        """Build Codec12 TCP command packet"""
-        data = cmd_text.encode('ascii')
-        data_len = len(data)
-        
-        # Build Payload
-        payload = struct.pack('B', TeltonikaProtocol.CODEC_12)  # Codec
-        payload += struct.pack('B', 1)  # Quantity 1
-        payload += struct.pack('B', 0x05)  # Type (Command)
-        payload += struct.pack('!I', data_len)  # Command length
-        payload += data  # Command data
-        payload += struct.pack('B', 1)  # Quantity 2
-        
-        # Calculate CRC
-        crc = TeltonikaProtocol.crc16(payload)
-        
-        # Build full packet
-        packet = struct.pack('!I', 0)  # Preamble
-        packet += struct.pack('!I', len(payload))  # Data length
-        packet += payload
-        packet += struct.pack('!I', crc)  # CRC
-        
-        return packet
-    
-    @staticmethod
-    def build_udp_ack(packet_id: int, avl_packet_id: int, count: int) -> bytes:
-        """Build UDP ACK packet"""
-        resp = struct.pack('!H', 5)  # Length
-        resp += struct.pack('!H', packet_id)  # Packet ID
-        resp += b'\x01'  # Type
-        resp += struct.pack('B', avl_packet_id)  # AVL Packet ID
-        resp += struct.pack('B', count)  # Count
-        return resp
 
+                # Codec 8E NX variable-length elements
+                if is_8e:
+                    nx_count = ru(cnt_sz)
+                    for _ in range(nx_count):
+                        io_id  = ru(id_sz)
+                        val_ln = ru(2)
+                        if off + val_ln > len(data):
+                            raise IndexError
+                        io_data[io_id] = data[off:off + val_ln].hex().upper()
+                        off += val_ln
+
+                rec['IO_Data'] = io_data
+                records.append(rec)
+        except (IndexError, struct.error):
+            pass  # partial decode is fine
+
+        return records
+
+    # ── Codec 12 command building ─────────────────────────────────────────────
+    @staticmethod
+    def build_codec12_command(cmd_text: str) -> bytes:
+        """Build a Codec 12 command packet (TCP-framed)."""
+        cmd_bytes = cmd_text.encode('ascii')
+        payload = bytearray()
+        payload.append(TeltonikaProtocol.CODEC_12)  # codec
+        payload.append(0x01)   # qty 1
+        payload.append(0x05)   # type = command
+        payload += struct.pack('!I', len(cmd_bytes))
+        payload += cmd_bytes
+        payload.append(0x01)   # qty 2
+
+        crc = TeltonikaProtocol.crc16(bytes(payload))
+
+        pkt  = struct.pack('!I', 0)               # preamble
+        pkt += struct.pack('!I', len(payload))     # data field length
+        pkt += bytes(payload)
+        pkt += struct.pack('!I', crc)
+        return pkt
+
+    # ── ACK builders ──────────────────────────────────────────────────────────
+    @staticmethod
+    def build_tcp_data_ack(record_count: int) -> bytes:
+        """4-byte TCP data ACK: 00 00 00 {N}."""
+        return struct.pack('!I', record_count)
+
+    @staticmethod
+    def build_udp_data_ack(pkt_id: int, not_usable: int,
+                           avl_pkt_id: int, record_count: int) -> bytes:
+        """7-byte UDP data ACK echoing request header fields.
+        Matches DTT: length(2) + pktId(2, LE copy) + notUsable(1) + avlPktId(1) + N(1).
+        """
+        resp = bytearray(7)
+        resp[0] = 0x00
+        resp[1] = 0x05
+        struct.pack_into('<H', resp, 2, pkt_id)   # little-endian echo (DTT style)
+        resp[4] = not_usable & 0xFF
+        resp[5] = avl_pkt_id & 0xFF
+        resp[6] = record_count & 0xFF
+        return bytes(resp)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Command queue item
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _QueuedCommand:
+    __slots__ = ('command', 'packet', 'created', 'sent_time',
+                 'retries', 'max_retries', 'response', 'status', 'callback')
+
+    def __init__(self, command: str, callback=None, max_retries: int = 10):
+        self.command = command
+        self.packet = TeltonikaProtocol.build_codec12_command(command)
+        self.created = datetime.datetime.now()
+        self.sent_time = None
+        self.retries = 0
+        self.max_retries = max_retries
+        self.response = None
+        self.status = 'queued'
+        self.callback = callback
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Server
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class TeltonikaServer:
-    """Teltonika GPS Server with TCP and UDP support"""
-    
-    def __init__(self, tcp_port=8000, udp_port=8001):
-        self.tcp_port = tcp_port
-        self.udp_port = udp_port
+    """Teltonika GPS Server – TCP **or** UDP on a single port."""
+
+    def __init__(self, port: int = 8000, protocol: str = 'TCP'):
+        self.port = port
+        self.protocol_mode = protocol.upper()
         self.running = False
-        
-        # TCP State
+
+        # TCP
         self.tcp_socket = None
-        self.tcp_clients = {}  # socket -> address
-        self.tcp_imei = {}  # socket -> IMEI
-        self.tcp_buffers = {}  # socket -> buffer
-        
-        # UDP State
+        self.tcp_clients = {}
+        self.tcp_imei = {}
+        self.tcp_buffers = {}
+
+        # UDP
         self.udp_socket = None
-        self.udp_clients = {}  # IMEI -> address
-        
-        # Data Storage
-        self.parsed_records = []  # List of parsed records
-        self.raw_messages = []  # List of raw messages
-        self.log_messages = []  # List of log messages
-        self.command_history = []  # List of command/response pairs
-        
-        # Command Queues
-        self.scheduled_commands = defaultdict(list)  # IMEI -> [commands]
-        self.pending_test_sequences = {}  # socket/IMEI -> (command, count, sent)
-        self.pending_commands = {}  # Track commands awaiting response: key -> {imei, command, sent_time, protocol}
-        
-        # Interval command control
-        self.interval_stop_flag = {}  # IMEI -> bool (stop request)
-        self.interval_last_record = {}  # IMEI -> timestamp of last record
-        
-        # Locks
+        self.udp_clients = {}  # IMEI → (addr, last_seen)
+
+        # Data stores (newest first)
+        self.parsed_records  = []
+        self.raw_messages    = []
+        self.log_messages    = []
+        self.command_history = []
+
+        # Command queues
+        self.command_queues: dict = defaultdict(list)
+        self._active_cmd: dict = {}
+
+        # Scheduled commands
+        self.scheduled_commands: dict = defaultdict(list)
+
+        # Interval
+        self.interval_stop_flag: dict = {}
+        self.interval_last_record: dict = {}
+
         self.lock = threading.Lock()
-    
-    def log(self, direction: str, message: str, msg_type: str = "INFO"):
-        """Add log message"""
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        log_entry = {
-            'timestamp': timestamp,
-            'direction': direction,
-            'type': msg_type,
-            'message': message
-        }
+        self._data_version = 0
+
+    @property
+    def data_version(self) -> int:
+        return self._data_version
+
+    # ── Logging ────────────────────────────────────────────────────────────────
+    def log(self, message: str, msg_type: str = "INFO"):
+        ts = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        entry = {'timestamp': ts, 'type': msg_type, 'message': message}
         with self.lock:
-            self.log_messages.insert(0, log_entry)
-            if len(self.log_messages) > 500:
-                self.log_messages = self.log_messages[:500]
-    
-    def add_raw_message(self, direction: str, data: bytes, protocol: str):
-        """Add raw message"""
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        raw_entry = {
-            'timestamp': timestamp,
-            'direction': direction,
-            'protocol': protocol,
-            'hex': data.hex().upper(),
-            'length': len(data)
-        }
+            self.log_messages.insert(0, entry)
+            if len(self.log_messages) > 1000:
+                self.log_messages = self.log_messages[:1000]
+            self._data_version += 1
+
+    def _add_raw(self, direction: str, data: bytes, protocol: str):
+        ts = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        entry = {'timestamp': ts, 'direction': direction, 'protocol': protocol,
+                 'hex': data.hex().upper(), 'length': len(data)}
         with self.lock:
-            self.raw_messages.insert(0, raw_entry)
-            if len(self.raw_messages) > 500:
-                self.raw_messages = self.raw_messages[:500]
-    
-    def start(self):
-        """Start the server"""
+            self.raw_messages.insert(0, entry)
+            if len(self.raw_messages) > 1000:
+                self.raw_messages = self.raw_messages[:1000]
+            self._data_version += 1
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def check_port(port: int, protocol: str = 'TCP') -> str | None:
+        """Test if *port* is available.  Returns error string or None."""
+        sock_type = socket.SOCK_STREAM if protocol.upper() == 'TCP' else socket.SOCK_DGRAM
+        s = socket.socket(socket.AF_INET, sock_type)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('0.0.0.0', port))
+            s.close()
+            return None
+        except OSError as e:
+            s.close()
+            return str(e)
+
+    def start(self) -> str | None:
+        """Start the server.  Returns error string or None on success."""
         if self.running:
-            return
-        
+            return None
+        # Pre-flight port check
+        err = self.check_port(self.port, self.protocol_mode)
+        if err:
+            self.log(f"Cannot start: {err}", "ERROR")
+            return f"Port {self.port} unavailable: {err}"
         self.running = True
-        
-        # Start TCP Server
-        tcp_thread = threading.Thread(target=self._tcp_server_thread, daemon=True)
-        tcp_thread.start()
-        
-        # Start UDP Server
-        udp_thread = threading.Thread(target=self._udp_server_thread, daemon=True)
-        udp_thread.start()
-        
-        self.log("SYS", f"Server started - TCP:{self.tcp_port}, UDP:{self.udp_port}", "START")
-    
+        self._start_error = None
+        if self.protocol_mode == 'TCP':
+            threading.Thread(target=self._tcp_server_loop, daemon=True).start()
+        else:
+            threading.Thread(target=self._udp_server_loop, daemon=True).start()
+        threading.Thread(target=self._command_sender_loop, daemon=True).start()
+        self.log(f"Server started – {self.protocol_mode} on port {self.port}", "START")
+        return None
+
     def stop(self):
-        """Stop the server"""
         self.running = False
-        
-        # Close TCP
-        if self.tcp_socket:
-            try:
-                self.tcp_socket.close()
-            except:
-                pass
-        
-        # Close UDP
-        if self.udp_socket:
-            try:
-                self.udp_socket.close()
-            except:
-                pass
-        
-        self.log("SYS", "Server stopped", "STOP")
-    
-    def _tcp_server_thread(self):
-        """TCP server thread"""
+        for s in [self.tcp_socket, self.udp_socket]:
+            if s:
+                try: s.close()
+                except: pass
+        with self.lock:
+            for s in list(self.tcp_clients.keys()):
+                try: s.close()
+                except: pass
+            self.tcp_clients.clear()
+            self.tcp_imei.clear()
+            self.tcp_buffers.clear()
+        self.log("Server stopped", "STOP")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  TCP
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _tcp_server_loop(self):
         try:
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.tcp_socket.bind(('0.0.0.0', self.tcp_port))
-            self.tcp_socket.listen(5)
+            self.tcp_socket.bind(('0.0.0.0', self.port))
+            self.tcp_socket.listen(10)
             self.tcp_socket.setblocking(False)
-            
-            self.log("TCP", f"Listening on port {self.tcp_port}", "LISTEN")
-            
+            self.log(f"TCP listening on :{self.port}", "START")
+
             while self.running:
                 try:
-                    # Build list of sockets to check
-                    readable_sockets = [self.tcp_socket] + list(self.tcp_clients.keys())
-                    
-                    readable, _, exceptional = select.select(readable_sockets, [], readable_sockets, 1.0)
-                    
+                    rlist = [self.tcp_socket] + list(self.tcp_clients.keys())
+                    readable, _, exceptional = select.select(rlist, [], rlist, 1.0)
+
                     for s in readable:
                         if s is self.tcp_socket:
-                            # New connection
                             try:
                                 client, addr = self.tcp_socket.accept()
                                 client.setblocking(False)
                                 with self.lock:
                                     self.tcp_clients[client] = addr
                                     self.tcp_buffers[client] = b''
-                                self.log("TCP", f"New connection from {addr[0]}:{addr[1]}", "CONN")
+                                self.log(f"TCP connect {addr[0]}:{addr[1]}", "CONN")
                             except:
                                 pass
                         else:
-                            # Existing client
                             try:
-                                data = s.recv(4096)
-                                if data:
+                                chunk = s.recv(8192)
+                                if chunk:
+                                    self._add_raw("RX", chunk, "TCP")
                                     with self.lock:
-                                        self.tcp_buffers[s] += data
-                                    self.add_raw_message("RX", data, "TCP")
+                                        self.tcp_buffers[s] = self.tcp_buffers.get(s, b'') + chunk
                                     self._process_tcp_buffer(s)
                                 else:
-                                    # Disconnected
                                     self._close_tcp(s)
                             except ConnectionResetError:
                                 self._close_tcp(s)
-                            except:
+                            except Exception:
                                 pass
-                    
+
                     for s in exceptional:
                         self._close_tcp(s)
-                
+
                 except Exception as e:
                     if self.running:
-                        self.log("ERR", f"TCP Error: {e}", "ERROR")
+                        self.log(f"TCP loop error: {e}", "ERROR")
                     time.sleep(0.1)
-        
         except Exception as e:
-            self.log("ERR", f"TCP Server Error: {e}", "ERROR")
-    
+            self.log(f"TCP bind error: {e}", "ERROR")
+
     def _process_tcp_buffer(self, sock):
-        """Process TCP buffer and extract packets"""
         with self.lock:
-            buff = self.tcp_buffers[sock]
-        
-        while True:
-            if len(buff) == 0:
-                break
-            
-            # Check for IMEI packet (starts with 0x00 0x0F)
-            if len(buff) >= 2 and buff[0:2] == b'\x00\x0F':
-                if len(buff) >= 17:  # 2 + 15 bytes
-                    packet = buff[0:17]
-                    buff = buff[17:]
-                    
-                    # Parse IMEI
-                    info = TeltonikaProtocol.parse_tcp_packet(packet)
-                    if info['type'] == 'imei':
-                        imei = info['imei']
-                        with self.lock:
-                            self.tcp_imei[sock] = imei
-                            self.tcp_buffers[sock] = buff
-                        
-                        self.log("RX", f"IMEI: {imei}", "IMEI")
-                        
-                        # Send IMEI ACK (0x01)
-                        try:
-                            sock.send(b'\x01')
-                            self.add_raw_message("TX", b'\x01', "TCP")
-                            self.log("TX", "IMEI ACK (0x01)", "ACK")
-                        except:
-                            self._close_tcp(sock)
-                            return
-                        
-                        # Check for scheduled commands
-                        self._check_scheduled_commands(sock, imei)
-                    
-                    continue
-                else:
-                    # Wait for more data
+            buf = self.tcp_buffers.get(sock, b'')
+
+        while len(buf) > 0:
+            # Ping
+            if buf[0] == 0xFF:
+                buf = buf[1:]
+                continue
+
+            # IMEI handshake (17 bytes: 00 0F + 15 ASCII)
+            if len(buf) >= 2 and buf[0:2] == b'\x00\x0F':
+                if len(buf) < 17:
                     break
-            
-            # Check for Data packet
-            elif len(buff) >= 12:
-                try:
-                    preamble = struct.unpack('!I', buff[0:4])[0]
-                    data_len = struct.unpack('!I', buff[4:8])[0]
-                    
-                    if preamble == 0 and data_len > 0 and data_len < 10000:
-                        # Looks like valid packet
-                        total_len = 8 + data_len + 4  # Preamble + Length + Data + CRC
-                        
-                        if len(buff) >= total_len:
-                            packet = buff[0:total_len]
-                            buff = buff[total_len:]
-                            
-                            # Validate CRC
-                            payload_plus_crc = packet[8:]
-                            if TeltonikaProtocol.validate_data_packet(payload_plus_crc):
-                                # Parse packet
-                                info = TeltonikaProtocol.parse_tcp_packet(packet)
-                                
-                                if info['type'] == 'data':
-                                    count = info['count']
-                                    self.log("RX", f"Data packet: {count} records (Codec: {info['codec']})", "DATA")
-                                    
-                                    # Store records
-                                    if 'records' in info and info['records']:
-                                        imei = self.tcp_imei.get(sock, "Unknown")
-                                        with self.lock:
-                                            for rec in info['records']:
-                                                rec['IMEI'] = imei
-                                                rec['Protocol'] = 'TCP'
-                                                self.parsed_records.insert(0, rec)
-                                            if len(self.parsed_records) > 1000:
-                                                self.parsed_records = self.parsed_records[:1000]
-                                            
-                                            # Update last record timestamp for interval commands
-                                            if imei and imei != 'Unknown':
-                                                self.interval_last_record[imei] = datetime.datetime.now()
-                                    
-                                    # Send DATA ACK (number of records as 4-byte integer)
-                                    ack = struct.pack('!I', count)
-                                    try:
-                                        sock.send(ack)
-                                        self.add_raw_message("TX", ack, "TCP")
-                                        self.log("TX", f"Data ACK ({count} records)", "ACK")
-                                    except:
-                                        self._close_tcp(sock)
-                                        with self.lock:
-                                            self.tcp_buffers[sock] = buff
-                                        return
-                                    
-                                    # Check for scheduled commands after receiving data
-                                    imei = self.tcp_imei.get(sock, None)
-                                    if imei:
-                                        self._check_scheduled_commands(sock, imei)
-                                
-                                elif info['type'] == 'response':
-                                    response_text = info.get('response', 'No response data')
-                                    self.log("RX", f"Response: {response_text}", "RESP")
-                                    
-                                    # Match with pending command
-                                    imei = self.tcp_imei.get(sock, "Unknown")
-                                    self._record_command_response(imei, response_text, "TCP")
-                                
-                                with self.lock:
-                                    self.tcp_buffers[sock] = buff
-                                continue
-                            else:
-                                self.log("ERR", f"CRC validation failed", "CRC")
-                                # Skip this packet
-                                buff = buff[total_len:]
-                                with self.lock:
-                                    self.tcp_buffers[sock] = buff
-                                continue
-                        else:
-                            # Wait for more data
-                            break
-                    else:
-                        # Invalid header, skip 1 byte
-                        buff = buff[1:]
-                        with self.lock:
-                            self.tcp_buffers[sock] = buff
-                        continue
-                except:
-                    # Error parsing, skip 1 byte
-                    buff = buff[1:]
+                imei = TeltonikaProtocol.parse_imei_packet(buf[:17])
+                buf = buf[17:]
+                if imei:
                     with self.lock:
-                        self.tcp_buffers[sock] = buff
+                        self.tcp_imei[sock] = imei
+                    self.log(f"IMEI: {imei}", "IMEI")
+                    try:
+                        sock.send(b'\x01')
+                        self._add_raw("TX", b'\x01', "TCP")
+                        self.log("IMEI ACK (0x01)", "ACK")
+                    except:
+                        self._close_tcp(sock)
+                        return
+                continue
+
+            # Data / Command response frame
+            if len(buf) >= 8:
+                preamble = struct.unpack('!I', buf[0:4])[0]
+                data_len = struct.unpack('!I', buf[4:8])[0]
+
+                if preamble != 0 or data_len == 0 or data_len > 65535:
+                    buf = buf[1:]
                     continue
-            else:
-                # Not enough data
-                if len(buff) > 4096:
-                    # Clear buffer if too large
-                    self.log("ERR", "Buffer overflow, clearing", "ERR")
-                    buff = b''
+
+                total = 8 + data_len + 4
+                if len(buf) < total:
+                    break
+
+                pkt = buf[:total]
+                buf = buf[total:]
+                info = TeltonikaProtocol.parse_tcp_data_packet(pkt)
+
+                if info is None or info.get('type') == 'crc_error':
+                    self.log("CRC error – packet dropped", "ERROR")
+                    continue
+
+                imei = self.tcp_imei.get(sock, 'Unknown')
+
+                if info['type'] == 'data':
+                    count = info['count']
+                    self.log(f"Data: {count} records ({info['codec_name']}) from {imei}", "DATA")
+
+                    # ACK immediately (before heavy processing, like DTT)
+                    ack = TeltonikaProtocol.build_tcp_data_ack(count)
+                    try:
+                        sock.send(ack)
+                        self._add_raw("TX", ack, "TCP")
+                        self.log(f"Data ACK ({count})", "ACK")
+                    except:
+                        self._close_tcp(sock)
+                        with self.lock:
+                            self.tcp_buffers[sock] = buf
+                        return
+
+                    # Store records
                     with self.lock:
-                        self.tcp_buffers[sock] = buff
-                break
-        
+                        for rec in info.get('records', []):
+                            rec['IMEI'] = imei
+                            rec['Protocol'] = 'TCP'
+                            self.parsed_records.insert(0, rec)
+                        if len(self.parsed_records) > 2000:
+                            self.parsed_records = self.parsed_records[:2000]
+                        if imei != 'Unknown':
+                            self.interval_last_record[imei] = datetime.datetime.now()
+
+                    # Enqueue any scheduled commands
+                    self._enqueue_scheduled(imei)
+
+                    # Send queued command right after ACK
+                    self._try_send_queued_command_tcp(sock, imei)
+
+                elif info['type'] == 'response':
+                    resp = info['response']
+                    self.log(f"Response from {imei}: {resp}", "RESP")
+                    self._handle_command_response(imei, resp, 'TCP')
+
+                continue
+
+            # Not enough data
+            if len(buf) > 16384:
+                self.log("Buffer overflow – clearing", "ERROR")
+                buf = b''
+            break
+
         with self.lock:
-            self.tcp_buffers[sock] = buff
-    
-    def _check_scheduled_commands(self, sock, imei):
-        """Check and send scheduled commands for an IMEI via TCP"""
-        # Get commands while holding lock
-        commands_to_send = []
-        with self.lock:
-            if imei in self.scheduled_commands and len(self.scheduled_commands[imei]) > 0:
-                commands_to_send = self.scheduled_commands[imei].copy()
-                self.scheduled_commands[imei] = []
-        
-        # Send commands without holding lock
-        for cmd in commands_to_send:
-            self._send_tcp_command(sock, cmd, imei)
-    
-    def _check_scheduled_commands_udp(self, addr, imei):
-        """Check and send scheduled commands for an IMEI via UDP"""
-        # Get commands while holding lock
-        commands_to_send = []
-        with self.lock:
-            if imei in self.scheduled_commands and len(self.scheduled_commands[imei]) > 0:
-                commands_to_send = self.scheduled_commands[imei].copy()
-                self.scheduled_commands[imei] = []
-        
-        # Send commands without holding lock
-        for cmd in commands_to_send:
-            self._send_udp_command(addr, cmd, imei)
-    
-    def _record_command_response(self, imei: str, response: str, protocol: str):
-        """Match response with pending command and record in history"""
-        with self.lock:
-            # Find oldest pending command for this IMEI
-            matched_cmd = None
-            matched_key = None
-            oldest_time = None
-            
-            for key, cmd_info in self.pending_commands.items():
-                if cmd_info['imei'] == imei:
-                    if oldest_time is None or cmd_info['sent_time'] < oldest_time:
-                        oldest_time = cmd_info['sent_time']
-                        matched_cmd = cmd_info
-                        matched_key = key
-            
-            # Record in history
-            history_entry = {
-                'timestamp': datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3],
-                'imei': imei,
-                'command': matched_cmd['command'] if matched_cmd else 'Unknown',
-                'response': response,
-                'protocol': protocol,
-                'duration_ms': int((datetime.datetime.now() - matched_cmd['sent_time']).total_seconds() * 1000) if matched_cmd else 0
-            }
-            
-            self.command_history.insert(0, history_entry)
-            if len(self.command_history) > 500:
-                self.command_history = self.command_history[:500]
-            
-            # Remove matched command from pending
-            if matched_key:
-                del self.pending_commands[matched_key]
-    
+            self.tcp_buffers[sock] = buf
+
     def _close_tcp(self, client):
-        """Close TCP client connection"""
         with self.lock:
-            if client in self.tcp_clients:
-                addr = self.tcp_clients[client]
-                del self.tcp_clients[client]
-                if client in self.tcp_imei:
-                    del self.tcp_imei[client]
-                if client in self.tcp_buffers:
-                    del self.tcp_buffers[client]
-                try:
-                    client.close()
-                except:
-                    pass
-                self.log("TCP", f"Disconnected: {addr[0]}:{addr[1]}", "DISC")
-    
-    def _udp_server_thread(self):
-        """UDP server thread"""
+            imei = self.tcp_imei.pop(client, None)
+            self.tcp_clients.pop(client, None)
+            self.tcp_buffers.pop(client, None)
+        try:
+            client.close()
+        except:
+            pass
+        self.log(f"TCP disconnect (IMEI={imei or '?'})", "DISC")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  UDP
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _udp_server_loop(self):
         try:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.udp_socket.bind(('0.0.0.0', self.udp_port))
+            self.udp_socket.bind(('0.0.0.0', self.port))
             self.udp_socket.setblocking(False)
-            
-            self.log("UDP", f"Listening on port {self.udp_port}", "LISTEN")
-            
+            self.log(f"UDP listening on :{self.port}", "START")
+
             while self.running:
                 try:
                     readable, _, _ = select.select([self.udp_socket], [], [], 1.0)
-                    
-                    if readable:
-                        data, addr = self.udp_socket.recvfrom(4096)
-                        
-                        self.add_raw_message("RX", data, "UDP")
-                        self.log("RX", f"UDP packet from {addr[0]}:{addr[1]} ({len(data)} bytes)", "UDP")
-                        
-                        # Try parsing as standard UDP packet first
-                        info = TeltonikaProtocol.parse_udp_packet(data)
-                        
-                        # If unknown, try parsing as TCP packet (for Codec12 responses via UDP)
-                        if info['type'] == 'unknown' and len(data) >= 12:
-                            info = TeltonikaProtocol.parse_tcp_packet(data)
-                            if info['type'] == 'response':
-                                # Codec12 response via UDP
-                                response_text = info.get('response', 'No response data')
-                                self.log("RX", f"Response via UDP: {response_text}", "RESP")
-                                
-                                # Try to find IMEI from recent UDP clients with this address
-                                imei = None
-                                with self.lock:
-                                    for client_imei, client_addr in self.udp_clients.items():
-                                        if client_addr == addr:
-                                            imei = client_imei
-                                            break
-                                
-                                if imei:
-                                    self._record_command_response(imei, response_text, "UDP")
-                                continue
-                        
-                        if info['type'] == 'data':
-                            imei = info.get('imei', 'Unknown')
-                            count = info['count']
-                            
-                            self.log("RX", f"IMEI: {imei}, {count} records (Codec: {info['codec']})", "DATA")
-                            
-                            # Update last record timestamp for interval commands
-                            if imei and imei != 'Unknown':
-                                with self.lock:
-                                    self.interval_last_record[imei] = datetime.datetime.now()
-                            
-                            # Store records
-                            if 'records' in info and info['records']:
-                                with self.lock:
-                                    for rec in info['records']:
-                                        rec['IMEI'] = imei
-                                        rec['Protocol'] = 'UDP'
-                                        self.parsed_records.insert(0, rec)
-                                    if len(self.parsed_records) > 1000:
-                                        self.parsed_records = self.parsed_records[:1000]
-                            
-                            # Update UDP client table
-                            if imei:
-                                with self.lock:
-                                    self.udp_clients[imei] = addr
-                            
-                            # Send UDP ACK
-                            ack = TeltonikaProtocol.build_udp_ack(
-                                info['udp_id'],
-                                info['avl_id'],
-                                count
-                            )
-                            self.udp_socket.sendto(ack, addr)
-                            self.add_raw_message("TX", ack, "UDP")
-                            self.log("TX", f"UDP ACK (ID: {info['udp_id']}, Count: {count})", "ACK")
-                            
-                            # Check for scheduled commands after sending ACK
-                            if imei:
-                                self._check_scheduled_commands_udp(addr, imei)
-                
-                except Exception as e:
+                    if not readable:
+                        continue
+
+                    data, addr = self.udp_socket.recvfrom(65535)
+                    self._add_raw("RX", data, "UDP")
+
+                    info = TeltonikaProtocol.parse_udp_packet(data)
+                    if info is None:
+                        self.log(f"UDP: unparseable from {addr}", "ERROR")
+                        continue
+
+                    if info['type'] == 'data':
+                        imei  = info['imei']
+                        count = info['count']
+                        self.log(f"UDP data: {count} records ({info['codec_name']}) "
+                                 f"from {imei} @ {addr[0]}:{addr[1]}", "DATA")
+
+                        # ACK
+                        ack = TeltonikaProtocol.build_udp_data_ack(
+                            info['udp_pkt_id'], info['udp_not_usable'],
+                            info['udp_avl_pkt_id'], count)
+                        self.udp_socket.sendto(ack, addr)
+                        self._add_raw("TX", ack, "UDP")
+                        self.log(f"UDP ACK (PktId={info['udp_pkt_id']}, N={count})", "ACK")
+
+                        # Store
+                        with self.lock:
+                            self.udp_clients[imei] = (addr, datetime.datetime.now())
+                            for rec in info.get('records', []):
+                                rec['IMEI'] = imei
+                                rec['Protocol'] = 'UDP'
+                                self.parsed_records.insert(0, rec)
+                            if len(self.parsed_records) > 2000:
+                                self.parsed_records = self.parsed_records[:2000]
+                            self.interval_last_record[imei] = datetime.datetime.now()
+
+                        self._enqueue_scheduled(imei)
+                        self._try_send_queued_command_udp(imei)
+
+                    elif info.get('type') == 'response':
+                        resp = info['response']
+                        imei = None
+                        with self.lock:
+                            for i, (a, _) in self.udp_clients.items():
+                                if a == addr:
+                                    imei = i
+                                    break
+                        if imei:
+                            self.log(f"UDP response from {imei}: {resp}", "RESP")
+                            self._handle_command_response(imei, resp, 'UDP')
+
+                except Exception:
                     if self.running:
-                        pass  # Ignore timeout errors
-                    time.sleep(0.1)
-        
+                        pass
+                    time.sleep(0.05)
+
         except Exception as e:
-            self.log("ERR", f"UDP Server Error: {e}", "ERROR")
-    
-    def send_tcp_command(self, imei: str, command: str, silent_fail=False):
-        """Send TCP command to device by IMEI"""
-        # Find socket by IMEI
-        sock = None
+            self.log(f"UDP bind error: {e}", "ERROR")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  Command queue & sending
+    # ═══════════════════════════════════════════════════════════════════════════
+    def queue_command(self, imei: str, command: str, callback=None):
+        qc = _QueuedCommand(command, callback=callback)
         with self.lock:
-            for s, client_imei in self.tcp_imei.items():
-                if client_imei == imei:
-                    sock = s
-                    break
-        
-        if sock:
-            self._send_tcp_command(sock, command, imei)
-            return True
-        else:
-            if not silent_fail:
-                self.log("ERR", f"No active TCP connection for IMEI: {imei}", "ERROR")
-            return False
-    
-    def _send_tcp_command(self, sock, command: str, imei: str):
-        """Send TCP command to specific socket"""
-        try:
-            packet = TeltonikaProtocol.build_tcp_command(command)
-            sock.send(packet)
-            self.add_raw_message("TX", packet, "TCP")
-            self.log("TX", f"Command: {command}", "CMD")
-            
-            # Track command for response matching
-            cmd_id = f"{imei}_{datetime.datetime.now().timestamp()}"
-            with self.lock:
-                self.pending_commands[cmd_id] = {
-                    'imei': imei,
-                    'command': command,
-                    'sent_time': datetime.datetime.now(),
-                    'protocol': 'TCP'
-                }
-        except Exception as e:
-            self.log("ERR", f"Failed to send command: {e}", "ERROR")
-    
-    def send_udp_command(self, imei: str, command: str, silent_fail=False):
-        """Send UDP command to device by IMEI"""
-        # Find address by IMEI
-        addr = None
-        with self.lock:
-            addr = self.udp_clients.get(imei)
-        
-        if addr:
-            self._send_udp_command(addr, command, imei)
-            return True
-        else:
-            if not silent_fail:
-                self.log("ERR", f"No active UDP connection for IMEI: {imei}", "ERROR")
-            return False
-    
-    def _send_udp_command(self, addr, command: str, imei: str):
-        """Send UDP command to specific address"""
-        try:
-            packet = TeltonikaProtocol.build_tcp_command(command)
-            self.udp_socket.sendto(packet, addr)
-            self.add_raw_message("TX", packet, "UDP")
-            self.log("TX", f"Command: {command}", "CMD")
-            
-            # Track command for response matching
-            cmd_id = f"{imei}_{datetime.datetime.now().timestamp()}"
-            with self.lock:
-                self.pending_commands[cmd_id] = {
-                    'imei': imei,
-                    'command': command,
-                    'sent_time': datetime.datetime.now(),
-                    'protocol': 'UDP'
-                }
-        except Exception as e:
-            self.log("ERR", f"Failed to send UDP command: {e}", "ERROR")
-    
-    def send_command(self, imei: str, command: str):
-        """Send command to device (auto-detect TCP or UDP)"""
-        # Try TCP first (silent fail)
-        if self.send_tcp_command(imei, command, silent_fail=True):
-            return True
-        # Try UDP if TCP failed
-        if self.send_udp_command(imei, command, silent_fail=False):
-            return True
-        return False
-    
+            self.command_queues[imei].append(qc)
+        self.log(f"Queued for {imei}: {command}", "CMD")
+
     def schedule_command(self, imei: str, command: str):
-        """Schedule a command to be sent when device next connects/sends data"""
         with self.lock:
             self.scheduled_commands[imei].append(command)
-        self.log("SYS", f"Scheduled command for {imei}: {command}", "SCHEDULE")
-    
-    def is_device_connected(self, imei: str) -> bool:
-        """Check if device is currently connected"""
+        self.log(f"Scheduled for {imei}: {command}", "SCHEDULE")
+
+    def _enqueue_scheduled(self, imei: str):
         with self.lock:
-            # Check TCP connections
-            for sock, client_imei in self.tcp_imei.items():
-                if client_imei == imei and sock in self.tcp_clients:
-                    return True
-            
-            # Check UDP connections (consider connected if seen recently)
-            if imei in self.udp_clients:
-                return True
-        
-        return False
-    
-    def stop_interval_command(self, imei: str):
-        """Request stop for running interval command"""
+            cmds = self.scheduled_commands.pop(imei, [])
+        for cmd in cmds:
+            self.queue_command(imei, cmd)
+
+    def _try_send_queued_command_tcp(self, sock, imei: str):
         with self.lock:
-            self.interval_stop_flag[imei] = True
-        self.log("SYS", f"Stop requested for interval command on {imei}", "INFO")
-    
-    def send_command_with_interval(self, imei: str, command: str, 
-                                   interval_sec: float = 0, duration_sec: float = 0,
-                                   protocol: str = 'auto', wait_for_record: bool = False):
-        """Send GPRS command with interval and duration support (replicates dataServer.js sendGprsCommand)
-        
-        Args:
-            imei: Device IMEI
-            command: Command string (e.g., 'getinfo')
-            interval_sec: Interval between sends in seconds (0 = send once)
-            duration_sec: Total duration to send commands in seconds (0 = send once)
-            protocol: 'auto', 'TCP', or 'UDP'
-            wait_for_record: If True, only send after device sends a record (like scheduler)
-        
-        Returns:
-            dict with result info: {'success': bool, 'commands_sent': int, 'errors': [], 'stopped': bool}
-        """
-        import time
-        from datetime import datetime, timedelta
-        
-        # Clear stop flag at start
-        with self.lock:
-            self.interval_stop_flag[imei] = False
-        
-        result = {
-            'success': True,
-            'commands_sent': 0,
-            'errors': [],
-            'stopped': False
-        }
-        
-        send_once = interval_sec == 0 or duration_sec == 0
-        
-        # Check if device is connected
-        if not self.is_device_connected(imei):
-            error_msg = f"Device {imei} is not connected"
-            self.log("ERR", error_msg, "ERROR")
-            result['success'] = False
-            result['errors'].append(error_msg)
-            return result
-        
-        start_time = datetime.now()
-        end_time = start_time + timedelta(seconds=duration_sec)
-        cycle_count = 0
-        
-        mode_str = "with wait-for-record" if wait_for_record else "standard"
-        self.log("SYS", f"Starting interval command loop ({mode_str}): cmd={command}, interval={interval_sec}s, duration={duration_sec}s", "INFO")
-        
+            active = self._active_cmd.get(imei)
+            if active and active.status == 'waiting':
+                return
+            q = self.command_queues.get(imei, [])
+            if not q:
+                return
+            qc = q[0]
         try:
-            while True:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                
-                # Check stop flag
-                with self.lock:
-                    if self.interval_stop_flag.get(imei, False):
-                        result['stopped'] = True
-                        self.log("SYS", f"Interval command loop stopped by user at cycle {cycle_count}", "INFO")
-                        break
-                
-                # Check if we should continue
-                if not send_once and datetime.now() >= end_time:
-                    break
-                
-                cycle_count += 1
-                
-                # Wait for record mode (like scheduler behavior)
-                if wait_for_record:
-                    # Wait for device to send a record
-                    record_timeout = 60  # 60 seconds timeout for record
-                    record_wait_start = datetime.now()
-                    
-                    with self.lock:
-                        last_record_time = self.interval_last_record.get(imei)
-                    
-                    # If no record yet, or if last record was before this cycle started
-                    if not last_record_time or last_record_time < start_time:
-                        self.log("SYS", f"Waiting for record from {imei} before sending command...", "INFO")
-                        
-                        while (datetime.now() - record_wait_start).total_seconds() < record_timeout:
-                            # Check stop flag while waiting
-                            with self.lock:
-                                if self.interval_stop_flag.get(imei, False):
-                                    result['stopped'] = True
-                                    self.log("SYS", "Stopped while waiting for record", "INFO")
-                                    return result
-                                
-                                last_record_time = self.interval_last_record.get(imei)
-                            
-                            # Check if new record received
-                            if last_record_time and last_record_time > record_wait_start:
-                                self.log("SYS", f"Record received from {imei}, proceeding with command", "INFO")
-                                break
-                            
-                            time.sleep(0.5)  # Check every 500ms
-                        else:
-                            # Timeout waiting for record
-                            error_msg = f"Timeout waiting for record from {imei} at cycle {cycle_count}"
-                            self.log("WARN", error_msg, "WARNING")
-                            result['errors'].append(error_msg)
-                            
-                            # Skip this cycle
-                            if send_once:
-                                break
-                            continue
-                
-                # Check connection status
-                if not self.is_device_connected(imei):
-                    error_msg = f"Device {imei} disconnected at cycle {cycle_count}"
-                    self.log("WARN", error_msg, "WARNING")
-                    result['errors'].append(error_msg)
-                    
-                    if not wait_for_record:
-                        # If not in wait mode, stop the loop
-                        break
-                    else:
-                        # In wait mode, wait for reconnection
-                        time.sleep(5)
-                        continue
-                
-                # Check if UDP address still valid (detect NAT timeout)
-                if protocol.upper() == 'UDP' or (protocol == 'auto' and imei in self.udp_clients):
-                    with self.lock:
-                        udp_addr = self.udp_clients.get(imei)
-                    
-                    if not udp_addr:
-                        error_msg = f"Lost UDP reference for {imei} at cycle {cycle_count}. NAT timeout likely occurred."
-                        self.log("WARN", error_msg, "WARNING")
-                        result['errors'].append(error_msg)
-                
-                # Send command based on protocol
-                success = False
-                if protocol.upper() == 'TCP':
-                    success = self.send_tcp_command(imei, command, silent_fail=False)
-                elif protocol.upper() == 'UDP':
-                    success = self.send_udp_command(imei, command, silent_fail=False)
-                else:  # auto
-                    success = self.send_command(imei, command)
-                
-                if success:
-                    result['commands_sent'] += 1
-                else:
-                    result['errors'].append(f"Failed to send at {elapsed:.1f}s (cycle {cycle_count})")
-                
-                # If sending once, break after first send
-                if send_once:
-                    break
-                
-                # Calculate precise sleep time to maintain interval timing
-                next_cycle_target = cycle_count * interval_sec
-                elapsed_now = (datetime.now() - start_time).total_seconds()
-                sleep_time = next_cycle_target - elapsed_now
-                
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-        
+            sock.send(qc.packet)
+            self._add_raw("TX", qc.packet, "TCP")
+            self.log(f"CMD → {imei}: {qc.command}", "CMD")
+            with self.lock:
+                qc.sent_time = datetime.datetime.now()
+                qc.status = 'waiting'
+                self._active_cmd[imei] = qc
         except Exception as e:
-            result['success'] = False
-            result['errors'].append(str(e))
-            self.log("ERR", f"send_command_with_interval error: {e}", "ERROR")
-        
-        total_time = (datetime.now() - start_time).total_seconds()
-        self.log("SYS", 
-                f"Interval command loop completed: sent {result['commands_sent']} commands to {imei} "
-                f"over {total_time:.1f}s", "INFO")
-        
-        return result
-    
-    def get_connected_devices(self):
-        """Get list of connected devices"""
+            self.log(f"Send failed to {imei}: {e}", "ERROR")
+
+    def _try_send_queued_command_udp(self, imei: str):
+        with self.lock:
+            active = self._active_cmd.get(imei)
+            if active and active.status == 'waiting':
+                return
+            q = self.command_queues.get(imei, [])
+            if not q:
+                return
+            qc = q[0]
+            addr_info = self.udp_clients.get(imei)
+        if not addr_info:
+            return
+        addr = addr_info[0]
+        try:
+            self.udp_socket.sendto(qc.packet, addr)
+            self._add_raw("TX", qc.packet, "UDP")
+            self.log(f"CMD → {imei} (UDP): {qc.command}", "CMD")
+            with self.lock:
+                qc.sent_time = datetime.datetime.now()
+                qc.status = 'waiting'
+                self._active_cmd[imei] = qc
+        except Exception as e:
+            self.log(f"UDP send failed to {imei}: {e}", "ERROR")
+
+    def _handle_command_response(self, imei: str, response: str, protocol: str):
+        with self.lock:
+            qc = self._active_cmd.pop(imei, None)
+            cmd_text = qc.command if qc else 'Unknown'
+            duration = 0
+            if qc and qc.sent_time:
+                duration = int((datetime.datetime.now() - qc.sent_time).total_seconds() * 1000)
+                qc.status = 'completed'
+                qc.response = response
+                q = self.command_queues.get(imei, [])
+                if q and q[0] is qc:
+                    q.pop(0)
+
+            self.command_history.insert(0, {
+                'timestamp': datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                'imei': imei, 'command': cmd_text, 'response': response,
+                'protocol': protocol, 'duration_ms': duration,
+            })
+            if len(self.command_history) > 1000:
+                self.command_history = self.command_history[:1000]
+
+        if qc and qc.callback:
+            try:
+                qc.callback(response)
+            except:
+                pass
+
+    def _command_sender_loop(self):
+        """Background retry / timeout loop (every 3 s)."""
+        while self.running:
+            time.sleep(3)
+            try:
+                with self.lock:
+                    imeis = list(self._active_cmd.keys())
+                for imei in imeis:
+                    with self.lock:
+                        qc = self._active_cmd.get(imei)
+                    if not qc or qc.status != 'waiting':
+                        continue
+                    if qc.sent_time and (datetime.datetime.now() - qc.sent_time).total_seconds() > 30:
+                        qc.retries += 1
+                        if qc.retries >= qc.max_retries:
+                            self.log(f"Command timeout for {imei}: {qc.command}", "ERROR")
+                            with self.lock:
+                                qc.status = 'error'
+                                self._active_cmd.pop(imei, None)
+                                q = self.command_queues.get(imei, [])
+                                if q and q[0] is qc:
+                                    q.pop(0)
+                                self.command_history.insert(0, {
+                                    'timestamp': datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                                    'imei': imei, 'command': qc.command,
+                                    'response': '⏱ TIMEOUT', 'protocol': self.protocol_mode,
+                                    'duration_ms': -1,
+                                })
+                        else:
+                            self.log(f"Retry {qc.retries}/{qc.max_retries} for {imei}", "CMD")
+                            qc.sent_time = None
+                            qc.status = 'queued'
+                            with self.lock:
+                                self._active_cmd.pop(imei, None)
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  Public API
+    # ═══════════════════════════════════════════════════════════════════════════
+    def send_command(self, imei: str, command: str) -> bool:
+        """Queue & attempt to send a command. Always returns True (queued)."""
+        self.queue_command(imei, command)
+        if self.protocol_mode == 'TCP':
+            sock = self._find_tcp_socket(imei)
+            if sock:
+                self._try_send_queued_command_tcp(sock, imei)
+        else:
+            self._try_send_queued_command_udp(imei)
+        return True
+
+    def _find_tcp_socket(self, imei: str):
+        with self.lock:
+            for s, i in self.tcp_imei.items():
+                if i == imei and s in self.tcp_clients:
+                    return s
+        return None
+
+    def is_device_connected(self, imei: str) -> bool:
+        with self.lock:
+            for s, i in self.tcp_imei.items():
+                if i == imei and s in self.tcp_clients:
+                    return True
+            info = self.udp_clients.get(imei)
+            if info:
+                _, last = info
+                if (datetime.datetime.now() - last).total_seconds() < 300:
+                    return True
+                else:
+                    del self.udp_clients[imei]
+        return False
+
+    def get_connected_devices(self) -> list:
         devices = []
         with self.lock:
-            # TCP devices
             for sock, imei in self.tcp_imei.items():
                 if sock in self.tcp_clients:
                     addr = self.tcp_clients[sock]
                     devices.append({
-                        'IMEI': imei,
-                        'Protocol': 'TCP',
-                        'Address': f"{addr[0]}:{addr[1]}",
-                        'Status': 'Connected'
+                        'IMEI': imei, 'Protocol': 'TCP',
+                        'Address': f"{addr[0]}:{addr[1]}", 'Status': 'Connected',
                     })
-            
-            # UDP devices (recent)
-            for imei, addr in self.udp_clients.items():
-                devices.append({
-                    'IMEI': imei,
-                    'Protocol': 'UDP',
-                    'Address': f"{addr[0]}:{addr[1]}",
-                    'Status': 'Recent'
-                })
-        
+            now = datetime.datetime.now()
+            stale = []
+            for imei, (addr, last) in self.udp_clients.items():
+                age = (now - last).total_seconds()
+                if age < 300:
+                    devices.append({
+                        'IMEI': imei, 'Protocol': 'UDP',
+                        'Address': f"{addr[0]}:{addr[1]}",
+                        'Status': f'Last seen {int(age)}s ago',
+                    })
+                else:
+                    stale.append(imei)
+            for imei in stale:
+                del self.udp_clients[imei]
         return devices
+
+    def get_queue_status(self, imei: str = None) -> dict:
+        with self.lock:
+            if imei:
+                q = self.command_queues.get(imei, [])
+                active = self._active_cmd.get(imei)
+                return {
+                    'queued': len(q),
+                    'active': active.command if active and active.status == 'waiting' else None,
+                    'retries': active.retries if active else 0,
+                }
+            status = {}
+            for im, q in self.command_queues.items():
+                active = self._active_cmd.get(im)
+                if q or active:
+                    status[im] = {
+                        'queued': len(q),
+                        'active': active.command if active and active.status == 'waiting' else None,
+                    }
+            return status
+
+    def stop_interval_command(self, imei: str):
+        with self.lock:
+            self.interval_stop_flag[imei] = True
+        self.log(f"Stop requested for interval on {imei}", "INFO")
+
+    def send_command_with_interval(self, imei: str, command: str,
+                                   interval_sec: float = 0, duration_sec: float = 0,
+                                   wait_for_record: bool = False):
+        """Repeatedly queue a command at *interval_sec* for *duration_sec*."""
+        with self.lock:
+            self.interval_stop_flag[imei] = False
+
+        result = {'success': True, 'commands_sent': 0, 'errors': [], 'stopped': False}
+        send_once = interval_sec == 0 or duration_sec == 0
+        start = datetime.datetime.now()
+        end = start + datetime.timedelta(seconds=duration_sec)
+
+        self.log(f"Interval start: '{command}' every {interval_sec}s "
+                 f"for {duration_sec}s to {imei}", "INFO")
+
+        try:
+            cycle = 0
+            while True:
+                with self.lock:
+                    if self.interval_stop_flag.get(imei):
+                        result['stopped'] = True
+                        break
+
+                if not send_once and datetime.datetime.now() >= end:
+                    break
+
+                cycle += 1
+
+                if wait_for_record:
+                    wait_start = datetime.datetime.now()
+                    while (datetime.datetime.now() - wait_start).total_seconds() < 120:
+                        with self.lock:
+                            if self.interval_stop_flag.get(imei):
+                                result['stopped'] = True
+                                return result
+                            lr = self.interval_last_record.get(imei)
+                        if lr and lr > wait_start:
+                            break
+                        time.sleep(0.3)
+                    else:
+                        result['errors'].append(f"Timeout waiting for record (cycle {cycle})")
+                        if send_once:
+                            break
+                        continue
+
+                ok = self.send_command(imei, command)
+                if ok:
+                    result['commands_sent'] += 1
+                else:
+                    result['errors'].append(f"Send failed (cycle {cycle})")
+
+                if send_once:
+                    break
+
+                target = cycle * interval_sec
+                elapsed = (datetime.datetime.now() - start).total_seconds()
+                sl = target - elapsed
+                if sl > 0:
+                    while sl > 0:
+                        time.sleep(min(sl, 0.5))
+                        sl -= 0.5
+                        with self.lock:
+                            if self.interval_stop_flag.get(imei):
+                                result['stopped'] = True
+                                return result
+
+        except Exception as e:
+            result['success'] = False
+            result['errors'].append(str(e))
+
+        self.log(f"Interval done: sent {result['commands_sent']} to {imei}", "INFO")
+        return result

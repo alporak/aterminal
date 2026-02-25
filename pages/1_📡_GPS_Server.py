@@ -1,5 +1,7 @@
 """
-Teltonika GPS Server - Real-time device monitoring
+Teltonika GPS Server – Streamlit UI
+Real-time device monitoring with @st.fragment auto-refresh.
+No full-page polling — only data sections re-render every ~1 s.
 """
 
 import streamlit as st
@@ -8,649 +10,915 @@ import pandas as pd
 import json
 import os
 import sys
+import datetime as _dt
 
-# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from server_app.teltonika_server import TeltonikaServer
-
-# Page config
-st.set_page_config(
-    page_title="GPS Server",
-    page_icon="📡",
-    layout="wide"
+from server_app.teltonika_server import (
+    TeltonikaServer, io_name, IO_ELEMENT_NAMES,
+    refresh_io_names, annotate_packet,
 )
 
-st.title("📡 Teltonika GPS Server")
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(page_title="GPS Server", page_icon="📡", layout="wide")
 
-# Load configuration
-def load_config():
-    """Load configuration from toolkit_settings.json"""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'toolkit_settings.json')
-    default_config = {'tcp_port': 8000, 'udp_port': 8001}
-    
-    try:
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                return {
-                    'tcp_port': config.get('tcp_port', default_config['tcp_port']),
-                    'udp_port': config.get('udp_port', default_config['udp_port'])
-                }
-    except Exception as e:
-        st.warning(f"Could not load config: {e}. Using defaults.")
-    
-    return default_config
+# ── Compact CSS ───────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .block-container { padding-top: 1.5rem; padding-bottom: 0; }
+    [data-testid="stMetric"] { padding: 0.4rem 0; }
+    [data-testid="stMetricValue"] { font-size: 1.1rem; }
+    [data-testid="stMetricLabel"] { font-size: 0.75rem; }
+    .server-status {
+        display: inline-block; padding: 2px 10px; border-radius: 12px;
+        font-size: 0.8rem; font-weight: 600; margin-left: 8px;
+        vertical-align: middle;
+    }
+    .status-on  { background: #0e6b0e; color: #fff; }
+    .status-off { background: #6b0e0e; color: #fff; }
+    /* Hex viewer */
+    .hex-viewer {
+        font-family: 'Cascadia Mono','Consolas','Courier New',monospace;
+        font-size: 12.5px; line-height: 1.7;
+        background: #0d1117; border-radius: 8px;
+        padding: 12px 16px; overflow: auto; max-height: 480px;
+        border: 1px solid #30363d;
+    }
+    .hex-viewer .hr { white-space: nowrap; }
+    .hex-viewer .ho { color: #6e7681; margin-right: 12px; user-select: none; }
+    .hex-viewer .hb {
+        padding: 1px 2px; border-radius: 2px; margin: 0 1px;
+        cursor: default; color: #e6edf3;
+    }
+    .hex-viewer .ha { margin-left: 14px; color: #8b949e; letter-spacing: 0.5px; }
+    .hex-legend { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+    .hex-legend span {
+        font-size: 11px; padding: 1px 7px; border-radius: 3px;
+        color: #fff; white-space: nowrap;
+    }
+    .log-entry { font-family: monospace; font-size: 0.82rem; padding: 1px 0; }
+</style>
+""", unsafe_allow_html=True)
 
-def save_config(tcp_port, udp_port):
-    """Save configuration to toolkit_settings.json"""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'toolkit_settings.json')
-    
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Configuration helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                           'toolkit_settings.json')
+DEFAULT_AVL_EXCEL = (
+    r"C:\Users\orak.al\Documents\fmb-firmware\teltonika_app"
+    r"\inc\event_queue\eq_avl_ids\FMB_AVL_IDS.xlsx"
+)
+
+
+def load_config() -> dict:
+    defaults = {'server_port': 8000, 'server_protocol': 'TCP',
+                'avl_ids_path': DEFAULT_AVL_EXCEL}
     try:
-        # Load existing config
-        config = {}
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-        
-        # Update ports
-        config['tcp_port'] = tcp_port
-        config['udp_port'] = udp_port
-        
-        # Save
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r') as f:
+                cfg = json.load(f)
+            return {
+                'server_port': cfg.get('server_port',
+                                       cfg.get('tcp_port', defaults['server_port'])),
+                'server_protocol': cfg.get('server_protocol',
+                                           defaults['server_protocol']),
+                'avl_ids_path': cfg.get('avl_ids_path', defaults['avl_ids_path']),
+            }
+    except Exception:
+        pass
+    return defaults
+
+
+def save_config(port: int, protocol: str, avl_path: str | None = None):
+    try:
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r') as f:
+                cfg = json.load(f)
+        cfg.pop('tcp_port', None); cfg.pop('udp_port', None)
+        cfg['server_port'] = port
+        cfg['server_protocol'] = protocol
+        if avl_path is not None:
+            cfg['avl_ids_path'] = avl_path
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=4)
         return True
     except Exception as e:
-        st.error(f"Could not save config: {e}")
+        st.error(f"Config save error: {e}")
         return False
 
-# Initialize server in session state
+
+def save_avl_path(avl_path: str):
+    try:
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r') as f:
+                cfg = json.load(f)
+        cfg['avl_ids_path'] = avl_path
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=4)
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Server singleton (session-state)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 if 'server' not in st.session_state:
-    config = load_config()
-    st.session_state.server = TeltonikaServer(
-        tcp_port=config['tcp_port'], 
-        udp_port=config['udp_port']
-    )
-    st.session_state.server.start()
+    cfg = load_config()
+    srv = TeltonikaServer(port=cfg['server_port'], protocol=cfg['server_protocol'])
+    err = srv.start()
+    st.session_state.server_start_error = err
+    st.session_state.server = srv
 
-server = st.session_state.server
+server: TeltonikaServer = st.session_state.server
 
-# Sidebar controls
-with st.sidebar:
-    st.header("⚙️ Server Control")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Restart", use_container_width=True):
-            server.stop()
-            time.sleep(0.5)
-            server.start()
-            st.success("Server restarted")
-    
-    with col2:
-        if st.button("🗑️ Clear Data", use_container_width=True):
-            with server.lock:
-                server.parsed_records = []
-                server.raw_messages = []
-                server.log_messages = []
-                server.command_history = []
-            st.success("Data cleared")
-    
-    st.divider()
-    
-    st.header("📊 Statistics")
-    with server.lock:
-        st.metric("Records", len(server.parsed_records))
-        st.metric("Commands", len(server.command_history))
-        st.metric("Raw Messages", len(server.raw_messages))
-        st.metric("Log Entries", len(server.log_messages))
-    
-    st.divider()
-    
-    st.header("⚙️ Port Settings")
-    current_config = load_config()
-    
-    with st.form("port_settings"):
-        tcp_port_input = st.number_input(
-            "TCP Port", 
-            min_value=1024, 
-            max_value=65535, 
-            value=current_config['tcp_port'],
-            help="Port for TCP connections"
-        )
-        
-        udp_port_input = st.number_input(
-            "UDP Port", 
-            min_value=1024, 
-            max_value=65535, 
-            value=current_config['udp_port'],
-            help="Port for UDP connections"
-        )
-        
-        submitted = st.form_submit_button("💾 Save & Restart", use_container_width=True)
-        
-        if submitted:
-            if save_config(tcp_port_input, udp_port_input):
-                st.success("Settings saved!")
-                server.stop()
-                time.sleep(0.5)
-                # Recreate server with new ports
-                st.session_state.server = TeltonikaServer(
-                    tcp_port=tcp_port_input,
-                    udp_port=udp_port_input
-                )
-                st.session_state.server.start()
-                st.rerun()
-    
-    st.divider()
-    
-    st.header("🔌 Connected Devices")
-    devices = server.get_connected_devices()
-    if devices:
-        for dev in devices:
-            st.text(f"{dev['Protocol']}: {dev['IMEI']}")
+if 'io_selected_cols' not in st.session_state:
+    st.session_state.io_selected_cols = []
+
+if 'avl_loaded' not in st.session_state:
+    cfg = load_config()
+    avl_path = cfg.get('avl_ids_path', DEFAULT_AVL_EXCEL)
+    if avl_path and os.path.isfile(avl_path):
+        err = refresh_io_names(avl_path)
+        st.session_state.avl_load_error = err
     else:
-        st.text("No devices connected")
+        st.session_state.avl_load_error = None
+    st.session_state.avl_loaded = True
 
-# Main tabs
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📋 Live Data",
-    "📨 Send Commands",
-    "⏰ Schedule Commands",
-    "🧪 Test Sequences",
-    "🔁 Interval Commands",
-    "📚 Command History",
-    "📝 Raw Messages & Logs"
-])
 
-# Tab 1: Live Data
-with tab1:
-    st.header("Live GPS Data")
-    
-    # Show record details toggle
-    show_details = st.checkbox("Show full record details (IO data)", value=False)
-    
-    with server.lock:
-        records = server.parsed_records.copy()
-    
-    if records:
-        if show_details:
-            # Show full details including IO data
-            display_records = []
-            for rec in records:
-                display_rec = rec.copy()
-                # Convert IO_Data dict to string
-                if 'IO_Data' in display_rec:
-                    io_str = ", ".join([f"{k}={v}" for k, v in display_rec['IO_Data'].items()])
-                    display_rec['IO_Data'] = io_str
-                display_records.append(display_rec)
-            
-            df = pd.DataFrame(display_records)
-            st.dataframe(df, use_container_width=True, height=600)
-        else:
-            # Show basic data only
-            display_records = []
-            for rec in records:
-                display_rec = {
-                    'IMEI': rec.get('IMEI', ''),
-                    'Protocol': rec.get('Protocol', ''),
-                    'Timestamp': rec.get('Timestamp', ''),
-                    'Latitude': rec.get('Latitude', ''),
-                    'Longitude': rec.get('Longitude', ''),
-                    'Speed': rec.get('Speed', ''),
-                    'Angle': rec.get('Angle', ''),
-                    'Satellites': rec.get('Satellites', ''),
-                    'Altitude': rec.get('Altitude', '')
-                }
-                display_records.append(display_rec)
-            
-            df = pd.DataFrame(display_records)
-            st.dataframe(df, use_container_width=True, height=600)
-    else:
-        st.info("No records received yet")
-    
-    # Auto-refresh
-    if st.button("🔄 Refresh"):
-        st.rerun()
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Hex viewer HTML builder
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Tab 2: Send Commands
-with tab2:
-    st.header("Send Commands to Device")
-    
-    devices = server.get_connected_devices()
-    
-    if devices:
-        # Create device selection with protocol info
-        device_options = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
-        selected_device_str = st.selectbox(
-            "Select Device",
-            options=device_options
-        )
-        
-        # Get selected device info
-        selected_idx = device_options.index(selected_device_str)
-        selected_device = devices[selected_idx]
-        selected_imei = selected_device['IMEI']
-        selected_protocol = selected_device['Protocol']
-        
-        command = st.text_input("Command", placeholder="e.g., getver, getgps, setparam 1:1")
-        
-        if st.button("📤 Send Command"):
-            if command:
-                # Auto-detect TCP or UDP
-                success = server.send_command(selected_imei, command)
-                
-                if success:
-                    st.success(f"✅ Command sent to {selected_imei}")
-                else:
-                    st.error("❌ Failed to send command - device not connected")
+def build_hex_html(raw_hex: str, annotations: list[dict]) -> str:
+    try:
+        data = bytes.fromhex(raw_hex)
+    except Exception:
+        return f'<pre style="color:#e6edf3">{raw_hex}</pre>'
+    n = len(data)
+    if n == 0:
+        return '<p style="color:#8b949e">Empty packet</p>'
+
+    byte_bg  = [''] * n
+    byte_tip = [''] * n
+    for ann in annotations:
+        for i in range(ann['s'], min(ann['e'], n)):
+            byte_bg[i]  = ann['color']
+            byte_tip[i] = ann['label']
+
+    seen = set(); legend = []
+    for ann in annotations:
+        if ann['color'] not in seen:
+            seen.add(ann['color'])
+            short = ann['label'].split(':')[0].split('=')[0].strip()[:25]
+            legend.append(f'<span style="background:{ann["color"]}">{short}</span>')
+    legend_html = f'<div class="hex-legend">{"".join(legend)}</div>' if legend else ''
+
+    rows = []
+    for off in range(0, n, 16):
+        chunk = data[off:off + 16]
+        hcells = []; acells = []
+        for i, b in enumerate(chunk):
+            idx = off + i
+            bg  = byte_bg[idx]
+            tip = (byte_tip[idx].replace('"', '&quot;')
+                   .replace("'", '&#39;').replace('<', '&lt;'))
+            if bg:
+                hcells.append(f'<span class="hb" style="background:{bg}" '
+                              f'title="{tip}">{b:02X}</span>')
             else:
-                st.warning("Please enter a command")
-    else:
-        st.warning("No devices connected")
+                hcells.append(f'<span class="hb" title="{tip}">{b:02X}</span>')
+            ch = chr(b) if 32 <= b < 127 else '·'
+            if ch in ('<', '>', '&'):
+                ch = {'<': '&lt;', '>': '&gt;', '&': '&amp;'}[ch]
+            astyle = f' style="background:{bg}"' if bg else ''
+            acells.append(f'<span{astyle} title="{tip}">{ch}</span>')
+        for _ in range(16 - len(hcells)):
+            hcells.append('<span class="hb" style="color:transparent">  </span>')
+        hl = ' '.join(hcells[:8]); hr = ' '.join(hcells[8:])
+        rows.append(f'<div class="hr"><span class="ho">{off:08X}</span>'
+                    f'{hl}  {hr}<span class="ha">{"".join(acells)}</span></div>')
 
-# Tab 3: Schedule Commands
-with tab3:
-    st.header("Schedule Commands")
-    st.write("Commands will be sent automatically when the device next connects or sends data.")
-    
-    schedule_imei = st.text_input("Device IMEI", key="schedule_imei")
-    schedule_command = st.text_input("Command", key="schedule_command", placeholder="e.g., getver")
-    
-    if st.button("⏰ Schedule Command"):
-        if schedule_imei and schedule_command:
-            server.schedule_command(schedule_imei, schedule_command)
-            st.success(f"Command scheduled for {schedule_imei}")
-        else:
-            st.warning("Please enter both IMEI and command")
-    
+    return f'{legend_html}<div class="hex-viewer">{"".join(rows)}</div>'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  @st.fragment — auto-refreshing data sections (partial re-render only)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Sidebar live metrics / devices / queue ────────────────────────────────────
+@st.fragment(run_every="1s")
+def _sidebar_live():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        n_rec = len(srv.parsed_records)
+        n_cmd = len(srv.command_history)
+        n_raw = len(srv.raw_messages)
+        n_log = len(srv.log_messages)
+
+    mc1, mc2 = st.columns(2)
+    mc1.metric("Records", n_rec)
+    mc2.metric("Commands", n_cmd)
+    mc3, mc4 = st.columns(2)
+    mc3.metric("Raw Msgs", n_raw)
+    mc4.metric("Logs", n_log)
+
     st.divider()
-    st.subheader("Pending Scheduled Commands")
-    
-    with server.lock:
-        scheduled = server.scheduled_commands.copy()
-    
-    if any(scheduled.values()):
-        for imei, cmds in scheduled.items():
-            if cmds:
-                st.write(f"**{imei}:**")
-                for cmd in cmds:
-                    st.write(f"  - {cmd}")
-    else:
-        st.info("No pending commands")
 
-# Tab 4: Test Sequences
-with tab4:
-    st.header("Test Command Sequences")
-    st.write("Send the same command multiple times to a device.")
-    
-    devices = server.get_connected_devices()
-    
+    # Devices
+    st.subheader("🔌 Devices")
+    devices = srv.get_connected_devices()
     if devices:
-        # Create device selection with protocol info
-        device_options = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
-        test_device_selection = st.selectbox(
-            "Select Device",
-            options=device_options,
-            key="test_device"
-        )
-        
-        # Get selected IMEI and protocol
-        selected_idx = device_options.index(test_device_selection)
-        selected_device = devices[selected_idx]
-        test_imei = selected_device['IMEI']
-        test_protocol = selected_device['Protocol']
-        
-        test_command = st.text_input("Command", key="test_command", placeholder="e.g., getver")
-        test_count = st.number_input("Number of times to send", min_value=1, max_value=100, value=5)
-        test_timeout = st.number_input("Response timeout (seconds)", min_value=1.0, max_value=60.0, value=10.0, step=1.0, 
-                                       help="Maximum time to wait for response before sending next command")
-        
-        if st.button("🧪 Run Test Sequence"):
-            if test_command:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # Send commands and wait for responses
-                failed = False
-                for i in range(test_count):
-                    # Get current command history count
-                    with server.lock:
-                        initial_count = len(server.command_history)
-                    
-                    # Send command
-                    success = server.send_command(test_imei, test_command)
-                    if not success:
-                        status_text.error(f"Failed to send command {i+1}/{test_count}")
-                        failed = True
-                        break
-                    
-                    status_text.text(f"Sent {i+1}/{test_count}, waiting for response...")
-                    progress_bar.progress((i + 0.5) / test_count)
-                    
-                    # Wait for response (or timeout)
-                    response_received = False
-                    timeout_start = time.time()
-                    
-                    while time.time() - timeout_start < test_timeout:
-                        with server.lock:
-                            current_count = len(server.command_history)
-                            # Check if new response for this IMEI
-                            if current_count > initial_count:
-                                # Check if the latest entry is for our IMEI
-                                if server.command_history[0]['imei'] == test_imei:
-                                    response_received = True
-                                    break
-                        
-                        time.sleep(0.1)  # Poll every 100ms
-                    
-                    if response_received:
-                        status_text.text(f"Response received for {i+1}/{test_count}")
-                        progress_bar.progress((i+1) / test_count)
-                    else:
-                        status_text.warning(f"Timeout waiting for response {i+1}/{test_count}")
-                        progress_bar.progress((i+1) / test_count)
-                    
-                    # Small delay before next command
-                    if i < test_count - 1:
-                        time.sleep(0.5)
-                
-                if not failed:
-                    st.success(f"✅ Test sequence completed - {test_count} commands sent")
-            else:
-                st.warning("Please enter a command")
+        for d in devices:
+            st.markdown(
+                f"**{d['IMEI']}** · {d['Protocol']}  \n"
+                f"<small>{d['Address']} · {d['Status']}</small>",
+                unsafe_allow_html=True,
+            )
     else:
-        st.warning("No devices connected")
+        st.caption("No devices connected")
 
-# Tab 5: Interval Commands (Replicates dataServer.js sendGprsCommand)
-with tab5:
-    st.header("🔁 Send Commands with Interval & Duration")
-    st.write("Replicates JavaScript dataServer.js sendGprsCommand functionality")
-    st.caption("Example: Send 'getinfo' every 20 seconds for 1 hour (replicating your JS call)")
-    
-    devices = server.get_connected_devices()
-    
-    if devices:
-        # Device selection
-        device_options = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
-        selected_device_str = st.selectbox(
-            "Select Device",
-            options=device_options,
-            key="interval_device"
-        )
-        
-        selected_idx = device_options.index(selected_device_str)
-        selected_device = devices[selected_idx]
-        interval_imei = selected_device['IMEI']
-        interval_protocol = selected_device['Protocol']
-        
-        # Command input
-        interval_command = st.text_input(
-            "Command", 
-            key="interval_command",
-            value="getinfo",
-            placeholder="e.g., getinfo, getgps"
-        )
-        
-        # Time unit conversion helper
-        def convert_to_seconds(value, unit):
-            multipliers = {'s': 1, 'min': 60, 'h': 3600}
-            return value * multipliers.get(unit, 1)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("⏱️ Interval")
-            interval_col1, interval_col2 = st.columns([2, 1])
-            with interval_col1:
-                interval_value = st.number_input(
-                    "Value",
-                    min_value=0,
-                    max_value=3600,
-                    value=20,
-                    key="interval_value",
-                    help="0 = send once"
-                )
-            with interval_col2:
-                interval_unit = st.selectbox(
-                    "Unit",
-                    options=['s', 'min', 'h'],
-                    index=0,
-                    key="interval_unit"
-                )
-            
-            interval_seconds = convert_to_seconds(interval_value, interval_unit)
-            st.caption(f"= {interval_seconds} seconds")
-        
-        with col2:
-            st.subheader("⏳ Duration")
-            duration_col1, duration_col2 = st.columns([2, 1])
-            with duration_col1:
-                duration_value = st.number_input(
-                    "Value",
-                    min_value=0,
-                    max_value=24,
-                    value=1,
-                    key="duration_value",
-                    help="0 = send once"
-                )
-            with duration_col2:
-                duration_unit = st.selectbox(
-                    "Unit",
-                    options=['s', 'min', 'h'],
-                    index=2,
-                    key="duration_unit"
-                )
-            
-            duration_seconds = convert_to_seconds(duration_value, duration_unit)
-            st.caption(f"= {duration_seconds} seconds")
-        
-        # Calculate expected commands
-        expected_commands = 1  # Default
-        if interval_seconds > 0 and duration_seconds > 0:
-            expected_commands = int(duration_seconds / interval_seconds)
-            st.info(f"📊 Expected commands: ~{expected_commands} ({duration_seconds}s / {interval_seconds}s)")
-        elif interval_seconds == 0 or duration_seconds == 0:
-            st.info("📊 Will send command once (interval or duration is 0)")
-            expected_commands = 1
-        else:
-            expected_commands = 1
-        
-        # Protocol selection
-        protocol_choice = st.radio(
-            "Protocol",
-            options=['auto', 'TCP', 'UDP'],
-            index=0,
-            horizontal=True,
-            key="interval_protocol",
-            help="Auto will try TCP first, then UDP"
-        )
-        
-        # Wait for record option (scheduler mode)
-        wait_for_record = st.checkbox(
-            "🔄 Wait for Record (Scheduler Mode)",
-            value=False,
-            key="wait_for_record",
-            help="Only send commands after device sends a record. Mimics scheduler behavior: waits for active connection + received record before each command."
-        )
-        
-        if wait_for_record:
-            st.caption("📌 In this mode, commands are sent only after the device sends a data record, ensuring active connection.")
-        
+    # Queue
+    q_status = srv.get_queue_status()
+    if q_status:
         st.divider()
-        
-        # Start/Stop controls
-        if 'interval_running' not in st.session_state:
-            st.session_state.interval_running = False
-        
-        if 'interval_result' not in st.session_state:
-            st.session_state.interval_result = None
-        
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-        
-        with col_btn1:
-            if st.button("▶️ Start", use_container_width=True, disabled=st.session_state.interval_running):
-                if interval_command:
-                    st.session_state.interval_running = True
-                    st.session_state.interval_result = None
+        st.subheader("📬 Queue")
+        for im, qs in q_status.items():
+            active = qs.get('active')
+            st.text(f"{im}: {qs['queued']} queued"
+                    + (f" | ⏳ {active}" if active else ""))
+
+
+# ── Live Data table ───────────────────────────────────────────────────────────
+@st.fragment(run_every="1s")
+def _live_data_table():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        records = list(srv.parsed_records)
+    selected_ios = st.session_state.get('io_selected_cols', [])
+
+    if not records:
+        st.info("Waiting for data…")
+        return
+
+    rows = []
+    for rec in records:
+        row = {
+            'IMEI': rec.get('IMEI', ''),
+            'Proto': rec.get('Protocol', ''),
+            'Timestamp': rec.get('Timestamp', ''),
+            'Lat': rec.get('Latitude', ''),
+            'Lon': rec.get('Longitude', ''),
+            'Speed': rec.get('Speed', ''),
+            'Angle': rec.get('Angle', ''),
+            'Sats': rec.get('Satellites', ''),
+            'Alt': rec.get('Altitude', ''),
+            'Prio': rec.get('Priority', ''),
+            'EvtIO': rec.get('Event_IO', ''),
+        }
+        io = rec.get('IO_Data', {})
+        for iid in selected_ios:
+            row[io_name(iid)] = io.get(iid, '')
+        rows.append(row)
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=550)
+    st.caption(f"{len(records)} records · live")
+
+
+# ── Recent command responses ──────────────────────────────────────────────────
+@st.fragment(run_every="1s")
+def _cmd_responses():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        recent = list(srv.command_history[:15])
+
+    if not recent:
+        st.caption("No responses yet — send a command above")
+        return
+
+    for e in recent:
+        ts   = e.get('timestamp', '')
+        cmd  = e.get('command', '')
+        resp = e.get('response', '')
+        dur  = e.get('duration_ms', 0)
+        im   = e.get('imei', '')
+
+        if resp.startswith('⏱'):
+            icon, clr = '⏱️', 'orange'
+        elif resp.strip():
+            icon, clr = '✅', 'green'
+        else:
+            icon, clr = '❓', 'gray'
+
+        st.markdown(
+            f"**{icon} [{ts}]** `{im}` · `{cmd}` → "
+            f"<span style='color:{clr}'>"
+            f"{resp[:120]}{'…' if len(resp) > 120 else ''}</span>"
+            f" <small>({dur}ms)</small>",
+            unsafe_allow_html=True,
+        )
+
+
+# ── Command history ──────────────────────────────────────────────────────────
+@st.fragment(run_every="2s")
+def _history_view():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        hist = list(srv.command_history)
+
+    if not hist:
+        st.info("No command history yet.")
+        return
+
+    df = pd.DataFrame(hist)
+    show = ['timestamp', 'imei', 'protocol', 'command', 'response', 'duration_ms']
+    existing = [c for c in show if c in df.columns]
+    st.dataframe(df[existing], use_container_width=True, height=500)
+
+    with st.expander("Detail view", expanded=False):
+        sel_i = st.selectbox(
+            "Entry", range(len(hist)),
+            format_func=lambda i: (
+                f"[{hist[i]['timestamp']}] {hist[i]['command']} → "
+                f"{hist[i]['response'][:60]}"
+                f"{'…' if len(hist[i]['response']) > 60 else ''}"
+            ),
+            key="hist_detail_sel",
+        )
+        if sel_i is not None:
+            e = hist[sel_i]
+            c1, c2 = st.columns(2)
+            c1.markdown(f"**Time:** {e['timestamp']}  \n"
+                        f"**IMEI:** {e['imei']}  \n"
+                        f"**Proto:** {e['protocol']}  \n"
+                        f"**Duration:** {e['duration_ms']} ms")
+            c2.markdown("**Command:**")
+            c2.code(e['command'], language=None)
+            c2.markdown("**Response:**")
+            c2.code(e['response'], language=None)
+
+    st.caption("live")
+
+
+# ── Raw messages hex viewer ──────────────────────────────────────────────────
+@st.fragment(run_every="1s")
+def _raw_messages_view():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        raw = list(srv.raw_messages[:200])
+
+    if not raw:
+        st.info("No raw messages yet.")
+        return
+
+    # Read filter state (widgets are in parent scope, values in session_state)
+    search_q    = st.session_state.get('raw_search', '')
+    dir_filter  = st.session_state.get('raw_dir', 'All')
+    type_filter = st.session_state.get('raw_type', 'All')
+
+    filtered = raw
+
+    if search_q:
+        sq = search_q.upper().replace(' ', '')
+        filtered = [m for m in filtered if sq in m['hex']]
+
+    if dir_filter == "RX ⬇️":
+        filtered = [m for m in filtered if m['direction'] == 'RX']
+    elif dir_filter == "TX ⬆️":
+        filtered = [m for m in filtered if m['direction'] == 'TX']
+
+    if type_filter != "All":
+        def _ok(m):
+            h, d, ln = m['hex'], m['direction'], m['length']
+            if type_filter == "IMEI":
+                return (ln == 17 and h.startswith('000F')) or (ln == 1 and h == '01')
+            if type_filter == "ACK":
+                return d == 'TX' and ln <= 7
+            if type_filter == "Command":
+                return ln >= 12 and h[:8] == '00000000' and h[16:18] in ('0C', '0D')
+            if type_filter == "Data":
+                if ln >= 12 and h[:8] == '00000000' and h[16:18] in ('08', '8E', '10'):
+                    return True
+                return d == 'RX' and ln > 10 and not h.startswith('00000000')
+            return True
+        filtered = [m for m in filtered if _ok(m)]
+
+    st.caption(f"Showing {len(filtered)}/{len(raw)} messages"
+               + (" · filtered" if len(filtered) != len(raw) else ""))
+
+    if not filtered:
+        st.warning("No messages match filter")
+        return
+
+    # Build label for each message
+    opts = []
+    for m in filtered[:100]:
+        icon = "⬇" if m['direction'] == "RX" else "⬆"
+        h, ln = m['hex'], m['length']
+        pt = ""
+        if ln == 17 and h.startswith('000F'):
+            pt = "IMEI"
+        elif ln == 1 and h == '01':
+            pt = "ACK"
+        elif ln == 4 and h.startswith('000000'):
+            pt = "DataACK"
+        elif ln == 7:
+            pt = "UDP-ACK"
+        elif ln >= 12 and h[:8] == '00000000':
+            pt = {'08': 'Codec8', '8E': 'Codec8E', '10': 'Codec16',
+                  '0C': 'Codec12', '0D': 'Codec13'}.get(h[16:18], 'Frame')
+        elif ln > 10:
+            pt = "UDP-Data"
+        else:
+            pt = f"{ln}B"
+        opts.append(f"{icon} [{m['timestamp']}] {m['protocol']} {pt} ({ln}B)")
+
+    sel = st.selectbox("Select message", range(len(opts)),
+                       format_func=lambda i: opts[i], key="_raw_sel")
+
+    if sel is not None and sel < len(filtered):
+        msg = filtered[sel]
+        st.markdown(f"**{msg['direction']}** · {msg['protocol']} · "
+                    f"{msg['length']} bytes · {msg['timestamp']}")
+
+        annotations = annotate_packet(msg['hex'], msg['protocol'])
+        st.markdown(build_hex_html(msg['hex'], annotations),
+                    unsafe_allow_html=True)
+
+        with st.expander("📋 Parsed fields", expanded=False):
+            if annotations:
+                ann_rows = []
+                for a in annotations:
+                    rng = (f"{a['s']:04X}–{a['e']-1:04X}"
+                           if a['e'] - a['s'] > 1 else f"{a['s']:04X}")
+                    ann_rows.append({
+                        'Offset': rng,
+                        'Bytes': a['e'] - a['s'],
+                        'Hex': msg['hex'][a['s']*2:a['e']*2],
+                        'Field': a['label'],
+                    })
+                st.dataframe(pd.DataFrame(ann_rows),
+                             use_container_width=True,
+                             height=min(400, 35 + len(ann_rows) * 35),
+                             hide_index=True)
+            else:
+                st.caption("No annotations")
+
+        with st.expander("📄 Raw hex (copyable)"):
+            st.code(msg['hex'], language=None)
+
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+@st.fragment(run_every="2s")
+def _logs_view():
+    srv: TeltonikaServer = st.session_state.get('server')
+    if not srv:
+        return
+
+    with srv.lock:
+        logs = list(srv.log_messages[:200])
+
+    if not logs:
+        st.info("No logs yet.")
+        return
+
+    lq = st.session_state.get('log_search', '')
+    if lq:
+        lq_lower = lq.lower()
+        logs = [l for l in logs if
+                lq_lower in l['message'].lower() or lq_lower in l['type'].lower()]
+
+    st.caption(f"{len(logs)} log entries")
+
+    icons = {
+        "IMEI": "🆔", "DATA": "📊", "ACK": "✅", "CMD": "📤",
+        "CONN": "🔌", "DISC": "🔴", "ERROR": "❌", "START": "🟢",
+        "STOP": "⛔", "SCHEDULE": "⏰", "RESP": "📩", "WARN": "⚠️",
+        "INFO": "ℹ️",
+    }
+
+    lines = []
+    for l in logs[:200]:
+        ic  = icons.get(l['type'], '·')
+        msg = l['message'].replace('<', '&lt;').replace('>', '&gt;')
+        lines.append(
+            f'<div class="log-entry">{ic} '
+            f'<span style="color:#6e7681">[{l["timestamp"]}]</span> '
+            f'<span style="color:#58a6ff;font-weight:600">{l["type"]}</span>: '
+            f'{msg}</div>'
+        )
+
+    st.markdown(
+        '<div style="max-height:500px;overflow-y:auto;background:#0d1117;'
+        'border-radius:8px;padding:8px 12px;border:1px solid #30363d">'
+        + ''.join(lines) + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Header
+# ═══════════════════════════════════════════════════════════════════════════════
+
+sc = "status-on" if server.running else "status-off"
+sl = "RUNNING" if server.running else "STOPPED"
+st.markdown(
+    f'<h2 style="margin:0">📡 GPS Server'
+    f'<span class="server-status {sc}">{sl}</span></h2>',
+    unsafe_allow_html=True,
+)
+st.caption(f"{server.protocol_mode} · port {server.port}")
+
+if st.session_state.get('server_start_error'):
+    st.error(f"⚠️ Server failed to start: {st.session_state.server_start_error}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Sidebar
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with st.sidebar:
+    st.header("⚙️ Server")
+
+    # ── Start / Stop / Restart ────────────────────────────────────────────────
+    c_on, c_off, c_rst = st.columns(3)
+    with c_on:
+        if st.button("▶️ Start", use_container_width=True, disabled=server.running):
+            err = server.start()
+            st.session_state.server_start_error = err
+            st.rerun()
+    with c_off:
+        if st.button("⏹ Stop", use_container_width=True, disabled=not server.running):
+            server.stop()
+            st.session_state.server_start_error = None
+            st.rerun()
+    with c_rst:
+        if st.button("🔄 Restart", use_container_width=True):
+            server.stop(); time.sleep(0.3)
+            cfg = load_config()
+            srv = TeltonikaServer(port=cfg['server_port'],
+                                 protocol=cfg['server_protocol'])
+            err = srv.start()
+            st.session_state.server = srv
+            st.session_state.server_start_error = err
+            st.rerun()
+
+    c_clr, _ = st.columns([1, 1])
+    with c_clr:
+        if st.button("🗑️ Clear data", use_container_width=True):
+            with server.lock:
+                server.parsed_records.clear()
+                server.raw_messages.clear()
+                server.log_messages.clear()
+                server.command_history.clear()
+            st.rerun()
+
+    st.divider()
+
+    # ── Live metrics / devices / queue (auto-refreshing fragment) ─────────────
+    _sidebar_live()
+
+    st.divider()
+
+    # ── Port & Protocol ───────────────────────────────────────────────────────
+    st.subheader("🔧 Settings")
+    cur = load_config()
+    with st.form("settings_form"):
+        port_in  = st.number_input("Port", 1024, 65535, value=cur['server_port'])
+        proto_in = st.radio("Protocol", ["TCP", "UDP"], horizontal=True,
+                            index=0 if cur['server_protocol'] == 'TCP' else 1)
+        if st.form_submit_button("💾 Save & Restart", use_container_width=True):
+            check_err = TeltonikaServer.check_port(port_in, proto_in)
+            if check_err and server.running:
+                if port_in != server.port or proto_in != server.protocol_mode:
+                    st.error(f"Port {port_in} unavailable: {check_err}")
+                else:
+                    save_config(port_in, proto_in)
+                    st.success("Saved (same config)")
+            else:
+                if save_config(port_in, proto_in):
+                    server.stop(); time.sleep(0.3)
+                    nsrv = TeltonikaServer(port=port_in, protocol=proto_in)
+                    err = nsrv.start()
+                    st.session_state.server = nsrv
+                    st.session_state.server_start_error = err
+                    if err:
+                        st.error(err)
+                    else:
+                        st.success("Saved & restarted")
+                    st.rerun()
+
+    st.divider()
+
+    # ── AVL IDs ───────────────────────────────────────────────────────────────
+    st.subheader("📑 AVL IO Names")
+    avl_path_in = st.text_input(
+        "Excel path", value=cur.get('avl_ids_path', DEFAULT_AVL_EXCEL),
+        key="avl_path_input",
+        help="Path to FMB_AVL_IDS.xlsx with MainTable sheet")
+    ac1, ac2 = st.columns(2)
+    with ac1:
+        if st.button("🔄 Load", use_container_width=True, key="avl_refresh"):
+            save_avl_path(avl_path_in)
+            err = refresh_io_names(avl_path_in)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"Loaded {len(IO_ELEMENT_NAMES)} IOs")
+            st.session_state.avl_loaded = True
+            st.rerun()
+    with ac2:
+        st.caption(f"{len(IO_ELEMENT_NAMES)} IDs loaded")
+
+    if st.session_state.get('avl_load_error'):
+        st.warning(f"AVL load: {st.session_state.avl_load_error}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Main tabs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tab_data, tab_cmd, tab_schedule, tab_test, tab_interval, tab_history, tab_raw = \
+    st.tabs([
+        "📋 Live Data", "📨 Commands", "⏰ Schedule", "🧪 Test Seq",
+        "🔁 Interval", "📚 History", "📝 Raw / Hex",
+    ])
+
+
+# ─── Tab 1: Live Data ────────────────────────────────────────────────────────
+with tab_data:
+    # IO column configurator (static — no fragment, avoids widget jitter)
+    with server.lock:
+        all_io_ids = set()
+        for r in server.parsed_records:
+            all_io_ids.update(r.get('IO_Data', {}).keys())
+    all_io_ids = sorted(all_io_ids)
+
+    if all_io_ids:
+        with st.expander("⚙️ Configure visible IO columns", expanded=False):
+            default_sel = st.session_state.io_selected_cols or all_io_ids[:10]
+            selected_ios = st.multiselect(
+                "IO Elements", options=all_io_ids,
+                default=[x for x in default_sel if x in all_io_ids],
+                format_func=lambda x: f"{io_name(x)} ({x})",
+            )
+            st.session_state.io_selected_cols = selected_ios
+
+    # Data table (auto-refreshing fragment)
+    _live_data_table()
+
+
+# ─── Tab 2: Send Commands ────────────────────────────────────────────────────
+with tab_cmd:
+    st.subheader("Send Command")
+    devices = server.get_connected_devices()
+
+    if not devices:
+        st.warning("No devices connected")
+    else:
+        dev_opts = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
+        sel = st.selectbox("Device", dev_opts, key="cmd_dev")
+        idx = dev_opts.index(sel)
+        imei = devices[idx]['IMEI']
+
+        command = st.text_input("Command",
+                                placeholder="getver, getgps, setparam …",
+                                key="cmd_input")
+
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("📤 Send", use_container_width=True):
+                if command.strip():
+                    server.send_command(imei, command.strip())
+                    st.success(f"Queued → {imei}")
+                else:
+                    st.warning("Enter a command")
+        with c2:
+            qs = server.get_queue_status(imei)
+            if qs and (qs['queued'] or qs['active']):
+                st.info(f"Queue: {qs['queued']} pending"
+                        + (f" | waiting: {qs['active']}" if qs['active'] else ""))
+
+    st.divider()
+    st.subheader("Recent Responses")
+    _cmd_responses()     # ← auto-refreshing fragment
+
+
+# ─── Tab 3: Schedule ─────────────────────────────────────────────────────────
+with tab_schedule:
+    st.subheader("Schedule Commands")
+    st.caption("Queued when the device next sends data.")
+
+    sc_imei = st.text_input("IMEI", key="sch_imei")
+    sc_cmd  = st.text_input("Command", key="sch_cmd", placeholder="getver")
+
+    if st.button("⏰ Schedule"):
+        if sc_imei and sc_cmd:
+            server.schedule_command(sc_imei.strip(), sc_cmd.strip())
+            st.success(f"Scheduled for {sc_imei}")
+        else:
+            st.warning("Enter IMEI and command")
+
+    st.divider()
+    with server.lock:
+        scheduled = dict(server.scheduled_commands)
+    if any(v for v in scheduled.values()):
+        for im, cmds in scheduled.items():
+            if cmds:
+                st.markdown(f"**{im}**")
+                for c in cmds:
+                    st.text(f"  → {c}")
+    else:
+        st.caption("No pending scheduled commands")
+
+
+# ─── Tab 4: Test Sequences ───────────────────────────────────────────────────
+with tab_test:
+    st.subheader("Test Sequence")
+    st.caption("Send the same command N times, waiting for each response.")
+    devices = server.get_connected_devices()
+
+    if not devices:
+        st.warning("No devices connected")
+    else:
+        dev_opts = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
+        ts_sel = st.selectbox("Device", dev_opts, key="ts_dev")
+        ts_idx = dev_opts.index(ts_sel)
+        ts_imei = devices[ts_idx]['IMEI']
+
+        ts_cmd     = st.text_input("Command", key="ts_cmd", placeholder="getver")
+        ts_n       = st.number_input("Count", 1, 200, 5, key="ts_n")
+        ts_timeout = st.number_input("Response timeout (s)", 1.0, 120.0, 10.0,
+                                     step=1.0, key="ts_to")
+
+        if st.button("🧪 Run"):
+            if ts_cmd:
+                bar    = st.progress(0)
+                status = st.empty()
+                for i in range(ts_n):
+                    with server.lock:
+                        init_count = len(server.command_history)
+                    server.send_command(ts_imei, ts_cmd)
+                    status.text(f"Sent {i+1}/{ts_n}, waiting…")
+                    bar.progress((i + 0.5) / ts_n)
+                    t0 = time.time(); got = False
+                    while time.time() - t0 < ts_timeout:
+                        with server.lock:
+                            if len(server.command_history) > init_count:
+                                got = True; break
+                        time.sleep(0.1)
+                    status.text(f"{'Response' if got else 'Timeout'} "
+                                f"{i+1}/{ts_n} {'✓' if got else '✗'}")
+                    bar.progress((i + 1) / ts_n)
+                    if i < ts_n - 1:
+                        time.sleep(0.3)
+                st.success(f"Sequence done – {ts_n} commands sent")
+            else:
+                st.warning("Enter a command")
+
+
+# ─── Tab 5: Interval Commands ────────────────────────────────────────────────
+with tab_interval:
+    st.subheader("🔁 Interval Commands")
+    st.caption("Repeatedly send a command at a fixed interval for a given duration.")
+    devices = server.get_connected_devices()
+
+    if not devices:
+        st.warning("No devices connected")
+    else:
+        dev_opts = [f"{d['IMEI']} ({d['Protocol']})" for d in devices]
+        iv_sel = st.selectbox("Device", dev_opts, key="iv_dev")
+        iv_idx = dev_opts.index(iv_sel)
+        iv_imei = devices[iv_idx]['IMEI']
+
+        iv_cmd = st.text_input("Command", value="getinfo", key="iv_cmd")
+
+        def _to_sec(val, unit):
+            return val * {'s': 1, 'min': 60, 'h': 3600}[unit]
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Interval**")
+            ic1, ic2 = st.columns([2, 1])
+            iv_val  = ic1.number_input("Value", 0, 3600, 20, key="iv_v")
+            iv_unit = ic2.selectbox("Unit", ['s', 'min', 'h'], key="iv_u")
+            iv_sec  = _to_sec(iv_val, iv_unit)
+            st.caption(f"= {iv_sec}s")
+        with c2:
+            st.markdown("**Duration**")
+            dc1, dc2 = st.columns([2, 1])
+            du_val  = dc1.number_input("Value", 0, 24, 1, key="du_v")
+            du_unit = dc2.selectbox("Unit", ['s', 'min', 'h'], index=2, key="du_u")
+            du_sec  = _to_sec(du_val, du_unit)
+            st.caption(f"= {du_sec}s")
+
+        expected = max(1, int(du_sec / iv_sec)) if iv_sec > 0 and du_sec > 0 else 1
+        st.info(f"≈ {expected} commands ({du_sec}s / {iv_sec}s)"
+                if iv_sec > 0 and du_sec > 0 else "Single send")
+
+        wait_rec = st.checkbox("🔄 Wait for record before each send", key="iv_wait")
+
+        if 'iv_running' not in st.session_state:
+            st.session_state.iv_running = False
+        if 'iv_result' not in st.session_state:
+            st.session_state.iv_result = None
+
+        b1, b2, _ = st.columns([1, 1, 2])
+        with b1:
+            if st.button("▶️ Start", use_container_width=True,
+                         disabled=st.session_state.iv_running):
+                if iv_cmd:
+                    st.session_state.iv_running = True
+                    st.session_state.iv_result = None
                     st.rerun()
                 else:
-                    st.warning("Please enter a command")
-        
-        with col_btn2:
-            if st.button("⏹️ Stop", use_container_width=True, disabled=not st.session_state.interval_running, type="secondary"):
-                if st.session_state.interval_running:
-                    # Request stop
-                    server.stop_interval_command(interval_imei)
-                    st.info("Stop requested... (wait for current cycle to complete)")
-        
-        with col_btn3:
-            if st.session_state.interval_running:
-                st.warning("⚠️ Loop running... (click Stop to terminate early)")
-        
-        # Run the interval loop
-        if st.session_state.interval_running:
-            with st.spinner(f"Sending '{interval_command}' every {interval_seconds}s for {duration_seconds}s..."):
-                result = server.send_command_with_interval(
-                    imei=interval_imei,
-                    command=interval_command,
-                    interval_sec=interval_seconds,
-                    duration_sec=duration_seconds,
-                    protocol=protocol_choice,
-                    wait_for_record=wait_for_record
-                )
-                
-                st.session_state.interval_result = result
-                st.session_state.interval_running = False
+                    st.warning("Enter a command")
+        with b2:
+            if st.button("⏹ Stop", use_container_width=True,
+                         disabled=not st.session_state.iv_running, type="secondary"):
+                server.stop_interval_command(iv_imei)
+                st.info("Stop requested…")
+
+        if st.session_state.iv_running:
+            with st.spinner(f"Sending '{iv_cmd}' every {iv_sec}s for {du_sec}s…"):
+                res = server.send_command_with_interval(
+                    iv_imei, iv_cmd, iv_sec, du_sec, wait_for_record=wait_rec)
+                st.session_state.iv_result = res
+                st.session_state.iv_running = False
                 st.rerun()
-        
-        # Display result
-        if st.session_state.interval_result:
-            result = st.session_state.interval_result
-            
-            if result.get('stopped', False):
-                st.info("⏹️ Stopped by user")
-            elif result['success'] and len(result['errors']) == 0:
-                st.success(f"✅ Interval command loop completed successfully!")
-            elif result['commands_sent'] > 0:
-                st.warning(f"⚠️ Completed with some errors")
+
+        if st.session_state.iv_result:
+            r = st.session_state.iv_result
+            if r.get('stopped'):
+                st.info("⏹ Stopped by user")
+            elif r['success'] and not r['errors']:
+                st.success("✅ Completed successfully")
+            elif r['commands_sent']:
+                st.warning("⚠️ Done with errors")
             else:
-                st.error("❌ Failed to send commands")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Commands Sent", result['commands_sent'])
-            with col2:
-                st.metric("Errors", len(result['errors']))
-            with col3:
-                if expected_commands > 0 and not result.get('stopped'):
-                    success_rate = (result['commands_sent'] / expected_commands * 100)
-                    st.metric("Success Rate", f"{success_rate:.1f}%")
-                elif result.get('stopped'):
-                    st.metric("Status", "⏹️ Stopped")
-                else:
-                    st.metric("Status", "✅ Done")
-            
-            if result['errors']:
-                with st.expander("⚠️ View Errors"):
-                    for i, error in enumerate(result['errors'], 1):
-                        st.text(f"{i}. {error}")
-            
-            if st.button("🗑️ Clear Result"):
-                st.session_state.interval_result = None
+                st.error("❌ Failed")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Sent", r['commands_sent'])
+            m2.metric("Errors", len(r['errors']))
+            if expected > 0 and not r.get('stopped'):
+                m3.metric("Rate", f"{r['commands_sent']/expected*100:.0f}%")
+
+            if r['errors']:
+                with st.expander("Errors"):
+                    for i, e in enumerate(r['errors'], 1):
+                        st.text(f"{i}. {e}")
+
+            if st.button("Clear result", key="iv_clr"):
+                st.session_state.iv_result = None
                 st.rerun()
-    
-    else:
-        st.warning("No devices connected")
 
-# Tab 6: Command History
-with tab6:
-    st.header("📚 Command History")
-    st.write("View commands sent and their responses")
-    
-    with server.lock:
-        cmd_history = server.command_history.copy()
-    
-    if cmd_history:
-        # Create DataFrame
-        df = pd.DataFrame(cmd_history)
-        
-        # Display as table
-        st.dataframe(
-            df[['timestamp', 'imei', 'protocol', 'command', 'response', 'duration_ms']],
-            use_container_width=True,
-            height=600
-        )
-        
-        # Show detailed view for specific entries
-        st.subheader("Details")
-        if len(cmd_history) > 0:
-            selected_idx = st.selectbox(
-                "Select command to see details",
-                range(len(cmd_history)),
-                format_func=lambda i: f"[{cmd_history[i]['timestamp']}] {cmd_history[i]['command']} -> {cmd_history[i]['response'][:50]}{'...' if len(cmd_history[i]['response']) > 50 else ''}"
-            )
-            
-            if selected_idx is not None:
-                entry = cmd_history[selected_idx]
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write(f"**Time:** {entry['timestamp']}")
-                    st.write(f"**IMEI:** {entry['imei']}")
-                    st.write(f"**Protocol:** {entry['protocol']}")
-                    st.write(f"**Duration:** {entry['duration_ms']} ms")
-                
-                with col2:
-                    st.write("**Command:**")
-                    st.code(entry['command'], language=None)
-                    st.write("**Response:**")
-                    st.code(entry['response'], language=None)
-    else:
-        st.info("No command history yet. Send a command to see it here.")
-    
-    # Auto-refresh
-    if st.button("🔄 Refresh History", key="refresh_history"):
-        st.rerun()
 
-# Tab 7: Raw Messages & Logs
-with tab7:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("📨 Raw Messages")
-        with server.lock:
-            raw_msgs = server.raw_messages.copy()
-        
-        if raw_msgs:
-            for msg in raw_msgs[:50]:  # Show last 50
-                direction_icon = "⬇️" if msg['direction'] == "RX" else "⬆️"
-                st.text(f"{direction_icon} [{msg['timestamp']}] {msg['protocol']} ({msg['length']} bytes)")
-                st.code(msg['hex'], language=None)
-        else:
-            st.info("No raw messages yet")
-    
-    with col2:
-        st.subheader("📝 Server Logs")
-        with server.lock:
-            logs = server.log_messages.copy()
-        
-        if logs:
-            for log in logs[:50]:  # Show last 50
-                type_icon = {
-                    "IMEI": "🆔",
-                    "DATA": "📊",
-                    "ACK": "✅",
-                    "CMD": "📤",
-                    "CONN": "🔌",
-                    "DISC": "🔴",
-                    "ERROR": "❌",
-                    "START": "🟢",
-                    "STOP": "⛔",
-                    "SCHEDULE": "⏰"
-                }.get(log['type'], "ℹ️")
-                
-                st.text(f"{type_icon} [{log['timestamp']}] {log['type']}: {log['message']}")
-        else:
-            st.info("No logs yet")
+# ─── Tab 6: Command History ──────────────────────────────────────────────────
+with tab_history:
+    _history_view()     # ← auto-refreshing fragment
+
+
+# ─── Tab 7: Raw / Hex ────────────────────────────────────────────────────────
+with tab_raw:
+    raw_tab1, raw_tab2 = st.tabs(["📨 Raw Messages", "📝 Logs"])
+
+    with raw_tab1:
+        # Filter controls (static — outside fragment to avoid input jitter)
+        fc1, fc2, fc3 = st.columns([3, 1, 1])
+        with fc1:
+            st.text_input("🔍 Search hex", placeholder="Search hex content…",
+                          key="raw_search", label_visibility="collapsed")
+        with fc2:
+            st.selectbox("Direction", ["All", "RX ⬇️", "TX ⬆️"],
+                         key="raw_dir", label_visibility="collapsed")
+        with fc3:
+            st.selectbox("Type", ["All", "Data", "ACK", "IMEI", "Command"],
+                         key="raw_type", label_visibility="collapsed")
+
+        # Display (auto-refreshing fragment)
+        _raw_messages_view()
+
+    with raw_tab2:
+        st.text_input("🔍 Search logs", placeholder="Filter log messages…",
+                      key="log_search", label_visibility="collapsed")
+        _logs_view()     # ← auto-refreshing fragment

@@ -77,11 +77,6 @@ def _render_meetings_time_section():
                         st.error(f"Failed: {resp.status_code} {err}")
                     except Exception:
                         st.error(f"Failed: {resp.status_code} {resp.text}")
-"""
-Jira Time Tracker – wrapper page for the jira-time-tracker submodule.
-Loads and executes the submodule's streamlit_app.py inside this page context,
-then adds the "Open Ticket Directory" utility below.
-"""
 
 import streamlit as st
 import os

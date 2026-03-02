@@ -78,6 +78,7 @@ def api_create_version(name, desc, start, release):
     return _post("version", {
         "name": name,
         "description": desc,
+        "project": PROJECT_KEY,
         "projectId": PROJECT_ID,
         "startDate": start,
         "releaseDate": release,
@@ -98,6 +99,128 @@ def api_search(jql, fields="key,summary,description,fixVersions"):
 
 def api_create_issue(fields):
     return _post("issue", {"fields": fields})
+
+
+def api_createmeta():
+    """Fetch all fields (with required flags) for the Release issue type."""
+    fields = {}
+    start_at = 0
+    while True:
+        r = _get(
+            f"issue/createmeta/{PROJECT_KEY}/issuetypes/{RELEASE_TYPE_ID}",
+            params={"startAt": start_at, "maxResults": 50},
+        )
+        if not r.ok:
+            break
+        data = r.json()
+        batch = data.get("fields", data.get("values", []))
+        for f in batch:
+            fid = f.get("fieldId") or f.get("key", "")
+            if fid:
+                fields[fid] = f
+        total = data.get("total", 0)
+        start_at += len(batch)
+        if start_at >= total or not batch:
+            break
+    if fields:
+        return fields
+    # Legacy endpoint fallback
+    r = _get("issue/createmeta", params={
+        "projectKeys": PROJECT_KEY,
+        "issuetypeIds": RELEASE_TYPE_ID,
+        "expand": "projects.issuetypes.fields",
+    })
+    if r.ok:
+        data = r.json()
+        for p in data.get("projects", []):
+            for it in p.get("issuetypes", []):
+                return it.get("fields", {})
+    return {}
+
+
+# ─── Clone helpers ────────────────────────────────────────────────────
+
+# Fields to SKIP when cloning (even if settable): they are either
+# attachment references (can't copy), sprint-specific, or time-tracking.
+_CLONE_SKIP = {
+    "attachment", "issuelinks", "parent",
+    "customfield_10020",  # Sprint
+    "timetracking",
+}
+
+# Fields the wizard always OVERRIDES with computed values.
+_CLONE_OVERRIDE = {
+    "project", "issuetype", "summary", "description",
+    "fixVersions", "components", "assignee",
+}
+
+
+def _clean_for_create(val):
+    """Reduce a cloned field value to what Jira accepts on POST.
+
+    Strips out read-only noise (self, avatarUrls, …) while keeping
+    the identifiers Jira needs (id, value, accountId, name).
+    """
+    if isinstance(val, list):
+        return [_clean_for_create(v) for v in val]
+    if isinstance(val, dict):
+        if "accountId" in val:
+            return {"accountId": val["accountId"]}
+        if "id" in val:
+            out = {"id": str(val["id"])}
+            if "value" in val:
+                out["value"] = val["value"]
+            return out
+        if "value" in val:
+            return {"value": val["value"]}
+        if "name" in val:
+            return {"name": val["name"]}
+    return val
+
+
+def _build_clone_payload(clone_source, settable_ids, overrides):
+    """Build the ``fields`` dict for issue creation.
+
+    *clone_source*  – ``fields`` dict from the source ticket (GET issue).
+    *settable_ids*  – set of field IDs that the create endpoint accepts.
+    *overrides*     – dict of fields the wizard computes (summary, desc, …).
+
+    Every settable field that has a value in *clone_source* is copied
+    (after sanitisation), except those in ``_CLONE_SKIP`` /
+    ``_CLONE_OVERRIDE`` which are replaced by *overrides*.
+    """
+    fields = {}
+    for fid in settable_ids:
+        if fid in _CLONE_SKIP or fid in _CLONE_OVERRIDE:
+            continue
+        val = clone_source.get(fid)
+        # Clear/override specific fields as requested
+        if fid in [
+            "versions",                # affected version
+            "customfield_10163",       # task requester
+            "customfield_10165",       # firmware link
+            "customfield_10167",       # configurator link
+            "customfield_10129",       # start date (migrated)
+            "customfield_10124",       # testing estimation
+            "customfield_10131",       # telematics program
+            "customfield_10197",       # Development Start Date
+            "customfield_10189",       # Development End Date
+        ]:
+            # Set telematics program to FMB platform
+            if fid == "customfield_10131":
+                fields[fid] = {"value": "FMB platform"}
+            # Set start/end dates from overrides if present
+            elif fid == "customfield_10197" and "customfield_10197" in overrides:
+                fields[fid] = overrides["customfield_10197"]
+            elif fid == "customfield_10189" and "customfield_10189" in overrides:
+                fields[fid] = overrides["customfield_10189"]
+            else:
+                fields[fid] = None
+            continue
+        if val is not None:
+            fields[fid] = _clean_for_create(val)
+    fields.update(overrides)
+    return fields
 
 
 # ─── Pure logic ───────────────────────────────────────────────────────
@@ -184,7 +307,10 @@ def _exp_desc(s):
 
 
 def _spec_summ(base, rev, num, client):
-    return f"{base}.Rev.{rev} FMBXXX SPEC={num} ({client})"
+    # Add spec suffix and full spec string
+    spec_suffix = f"_{num}" if num else ""
+    spec_string = f"eM2M_SPECIDL_{client}_SO_{str(num).zfill(4)}"
+    return f"{base}.Rev.{rev}{spec_suffix} FMBXXX SPEC={num} ({spec_string})"
 
 
 def _exp_summ(base, rev, s):
@@ -285,6 +411,8 @@ _D = dict(
     rc_ver_ok=None,           # created version response
     rc_tkt_ok=None,           # created ticket response
     rc_prev_type=None,        # last selected release type
+    rc_meta=None,             # createmeta field definitions
+    rc_clone_data=None,       # full clone source issue fields
 )
 for k, v in _D.items():
     st.session_state.setdefault(k, v)
@@ -307,7 +435,7 @@ if c2.button("Fetch", use_container_width=True) and key_in:
             "summary": iss["fields"]["summary"],
         }
         # reset downstream
-        for k in ("rc_ver_ok", "rc_tkt_ok", "rc_prev_tk", "rc_vs", "rc_nrev"):
+        for k in ("rc_ver_ok", "rc_tkt_ok", "rc_prev_tk", "rc_vs", "rc_nrev", "rc_clone_data"):
             st.session_state[k] = _D[k]
         st.rerun()
     else:
@@ -333,6 +461,7 @@ if rtype != st.session_state.rc_prev_type:
     st.session_state.rc_ver_ok = None
     st.session_state.rc_tkt_ok = None
     st.session_state.rc_prev_tk = None
+    st.session_state.rc_clone_data = None
 
 st.divider()
 
@@ -514,6 +643,7 @@ else:
         st.session_state.rc_prev_tk = None
         st.session_state.rc_ver_ok = None
         st.session_state.rc_tkt_ok = None
+        st.session_state.rc_clone_data = None
 
     # Find previous release ticket
     fc, _ = st.columns([1, 3])
@@ -578,6 +708,24 @@ if ready and ver_name and tkt_summ:
     st.divider()
     st.header("④ Preview & Create")
 
+    # ── Load create-issue metadata (settable fields list) ───────────────
+    if st.session_state.rc_meta is None:
+        with st.spinner("Loading field metadata…"):
+            st.session_state.rc_meta = api_createmeta()
+
+    # ── Load clone source (template for New Release, prev ticket for Revision)
+    if st.session_state.rc_clone_data is None:
+        clone_key = (
+            st.session_state.rc_prev_tk["key"]
+            if rtype == "Revision" and st.session_state.rc_prev_tk
+            else TEMPLATE_KEY
+        )
+        with st.spinner(f"Loading clone source ({clone_key})…"):
+            iss = api_issue(clone_key)
+            st.session_state.rc_clone_data = iss.get("fields", {}) if iss else {}
+
+    clone_fields = st.session_state.rc_clone_data or {}
+
     default_desc = _desc_table(src["key"], src["summary"])
 
     # ── Editable fields ───────────────────────────────────────────────
@@ -621,19 +769,38 @@ if ready and ver_name and tkt_summ:
     # ── Create version ────────────────────────────────────────────────
     vc = st.session_state.rc_ver_ok
     if vc:
-        st.success(f"✅ Version **{ver_name}** created  (id {vc['id']})")
+        st.success(f"✅ Version **{ver_name}** ready  (id {vc['id']})")
     else:
-        if st.button("✅ Create Version", type="primary", use_container_width=True):
-            with st.spinner("Creating version…"):
-                r = api_create_version(
-                    ver_name, ver_desc,
-                    str(start_date), str(rel_date),
-                )
-            if r.ok:
-                st.session_state.rc_ver_ok = r.json()
-                st.rerun()
-            else:
-                st.error(f"❌ {r.status_code}: {r.text}")
+        v_col1, v_col2 = st.columns(2)
+        with v_col1:
+            if st.button("✅ Create Version", type="primary", use_container_width=True):
+                with st.spinner("Creating version…"):
+                    r = api_create_version(
+                        ver_name, ver_desc,
+                        str(start_date), str(rel_date),
+                    )
+                if r.ok:
+                    st.session_state.rc_ver_ok = r.json()
+                    st.rerun()
+                else:
+                    st.error(
+                        f"❌ {r.status_code}: {r.text}\n\n"
+                        "If you lack *Manage Versions* permission, create the version "
+                        "manually in Jira and enter its ID below."
+                    )
+        with v_col2:
+            manual_vid = st.text_input(
+                "Or enter existing version ID",
+                placeholder="e.g. 14510",
+                key="rc_manual_vid",
+            )
+            if manual_vid and manual_vid.strip().isdigit():
+                if st.button("🔗 Use this version ID", use_container_width=True):
+                    st.session_state.rc_ver_ok = {
+                        "id": int(manual_vid.strip()),
+                        "name": ver_name,
+                    }
+                    st.rerun()
 
     # ── Create release ticket ─────────────────────────────────────────
     if st.session_state.rc_ver_ok:
@@ -660,22 +827,23 @@ if ready and ver_name and tkt_summ:
                     if has_spec:
                         comps.append({"id": COMP_CAT_SPEC})
 
-                    fields = {
+                    # Computed overrides – these always replace clone values
+                    overrides = {
                         "project": {"key": PROJECT_KEY},
                         "issuetype": {"id": RELEASE_TYPE_ID},
                         "summary": tkt_summ,
                         "description": tkt_desc,
                         "fixVersions": [{"id": str(ver["id"])}],
-                        "versions": [],          # affects versions – empty
-                        "labels": [],            # labels – empty
                         "components": comps,
                     }
                     if me:
-                        fields["assignee"] = {"accountId": me["accountId"]}
+                        overrides["assignee"] = {"accountId": me["accountId"]}
 
-                    # Explicitly clear fields the user asked to be empty
-                    fields["customfield_10165"] = None   # Firmware link
-                    fields["customfield_10167"] = None   # Configurator link
+                    # Build payload: clone source fields + overrides
+                    settable = set((st.session_state.rc_meta or {}).keys())
+                    fields = _build_clone_payload(
+                        clone_fields, settable, overrides,
+                    )
 
                     r = api_create_issue(fields)
 

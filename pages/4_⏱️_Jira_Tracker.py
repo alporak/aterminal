@@ -1,3 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Adding meetings time – log standup/meeting work to FMBP-44552
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_meetings_time_section():
+    from datetime import date
+    config = _load_jira_config()
+    email = config.get("email", "")
+    token = config.get("token", "")
+    st.divider()
+    st.subheader("🕒 Meetings Logging")
+    if not email or not token:
+        st.warning("Configure Jira credentials in the sidebar.")
+        return
+    today = date.today()
+    default_summary = f"{today.month:02}.{today.day:02} standup"
+    def parse_time_input(text: str) -> int | None:
+        import re
+        text = text.strip().lower()
+        if not text:
+            return None
+        m = re.fullmatch(r"(\d+):(\d{1,2})", text)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60
+        h_match = re.search(r"(\d+(?:\.\d+)?)\s*h", text)
+        m_match = re.search(r"(\d+(?:\.\d+)?)\s*m", text)
+        if h_match or m_match:
+            hours = float(h_match.group(1)) if h_match else 0
+            mins = float(m_match.group(1)) if m_match else 0
+            return int(hours * 3600 + mins * 60)
+        try:
+            val = float(text)
+            if val < 0:
+                return None
+            return int(val * 60)
+        except ValueError:
+            return None
+
+    with st.form("add_meeting_time_form", clear_on_submit=True):
+        time_input = st.text_input("Time (e.g. 1h 30m, 45m, 1:30)", value="30m")
+        summary = st.text_input("Summary", value=default_summary)
+        submit = st.form_submit_button("Add meeting time")
+        if submit:
+            seconds = parse_time_input(time_input)
+            if seconds is None or seconds <= 0:
+                st.error("Invalid time format. Use e.g. '1h 30m', '45m', '1:30', or minutes.")
+            else:
+                import requests
+                from datetime import datetime
+                started_dt = datetime.now()
+                started_str = started_dt.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
+                body = {
+                    "timeSpentSeconds": seconds,
+                    "started": started_str,
+                    "comment": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": summary}] if summary else [],
+                            }
+                        ],
+                    },
+                }
+                headers = {"Accept": "application/json", "Content-Type": "application/json"}
+                auth = requests.auth.HTTPBasicAuth(email, token)
+                resp = requests.post(
+                    f"https://teltonika-telematics.atlassian.net/rest/api/3/issue/FMBP-44552/worklog",
+                    headers=headers, auth=auth, json=body,
+                    params={"adjustEstimate": "auto", "notifyUsers": "false"},
+                )
+                if resp.status_code in (200, 201):
+                    st.success(f"Meeting time added to FMBP-44552 ({time_input})")
+                else:
+                    try:
+                        err = resp.json()
+                        st.error(f"Failed: {resp.status_code} {err}")
+                    except Exception:
+                        st.error(f"Failed: {resp.status_code} {resp.text}")
 """
 Jira Time Tracker – wrapper page for the jira-time-tracker submodule.
 Loads and executes the submodule's streamlit_app.py inside this page context,
@@ -216,6 +295,7 @@ def _render_ticket_directory_section():
 # Inject sidebar config + render the ticket directory section
 _render_tickets_folder_sidebar()
 _render_ticket_directory_section()
+_render_meetings_time_section()
 
 # Read and compile the submodule source
 with open(JIRA_APP, "r", encoding="utf-8") as _f:

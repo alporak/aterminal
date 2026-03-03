@@ -1,0 +1,43 @@
+{
+    "server": {
+        "protocol": "tcp",
+        "host": "0.0.0.0",
+        "port": 7580
+    },
+    "tls": {
+        "enabled": false,
+        "root_cert_path": "",
+        "key_path": ""
+    },
+    "device_management": {
+        "database_file": "devices.db"
+    },
+    "logging": {
+        "mode": "daily",
+        "path": "persistent_log.log"
+    },
+    "serial_monitor": {
+        "last_used_port": "COM3",
+        "last_used_baudrate": 115200,
+        "auto_scroll_enabled": false,
+        "command_history": [
+            ".reset",
+            ".shrec",
+            "@modem_simul:+CGEV: NW DETACH"
+        ],
+        "predefined_commands": [
+            {
+                "name": "high prio",
+                "command": ".shrec"
+            },
+            {
+                "name": "simul mod",
+                "command": "@modem_simul:+CGEV: NW DETACH"
+            },
+            {
+                "name": "Reset",
+                "command": ".reset"
+            }
+        ]
+    }
+}

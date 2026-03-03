@@ -38,35 +38,19 @@ st.markdown("---")
 
 # --- Tool cards: compact, with a personality ---
 tools = [
-    ("📡", "GPS Server",       "Listen to devices scream their coordinates into the void"),
-    ("🔍", "Log Parser",       "Turn wall-of-text logs into something a human can read"),
-    ("🔌", "COM Unlocker",     "Evict whatever is squatting on your COM port"),
-    ("⏱️", "Jira Tracker",     "Proof you actually worked today"),
-    ("🚀", "Release Creator",  "Ship it before QA finds out"),
+    ("📡", "GPS Server",       "Listen to devices scream their coordinates into the void", "pages/1_📡_GPS_Server.py"),
+    ("🔍", "Log Parser",       "Turn wall-of-text logs into something a human can read", "pages/2_🔍_Log_Parser.py"),
+    ("🔌", "COM Unlocker",     "Evict whatever is squatting on your COM port", "pages/3_🔌_COM_Unlocker.py"),
+    ("⏱️", "Jira Tracker",     "Proof you actually worked today", "pages/4_⏱️_Jira_Tracker.py"),
+    ("🚀", "Release Creator",  "Ship it before QA finds out", "pages/5_🚀_Release_Creator.py"),
 ]
 
 cols = st.columns(len(tools))
-for col, (icon, name, tagline) in zip(cols, tools):
+for col, (icon, name, tagline, page) in zip(cols, tools):
     with col:
-        st.markdown(
-            f"""
-            <div style="
-                border: 1px solid #333;
-                border-radius: 12px;
-                padding: 1.2rem 1rem;
-                text-align: center;
-                height: 180px;
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-            ">
-                <div style="font-size: 2rem;">{icon}</div>
-                <div style="font-weight: 600; font-size: 1rem; margin: 0.4rem 0;">{name}</div>
-                <div style="font-size: 0.8rem; opacity: 0.7;">{tagline}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Using st.page_link (Streamlit 1.31+) for navigation
+        st.page_link(page, label=name, icon=icon, use_container_width=True)
+        st.caption(tagline)
 
 st.markdown("")
 

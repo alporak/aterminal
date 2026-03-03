@@ -32,6 +32,10 @@ except ImportError as e:
     DEPENDENCIES_OK = False
     IMPORT_ERROR = str(e)
 
+# Ensure GPS Server is running globally
+from modules.server_singleton import ensure_server_session
+ensure_server_session()
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Settings helpers ────────────────────────────────────────────────
@@ -616,7 +620,7 @@ with tab_upload:
 
                         if not output_log or not os.path.exists(output_log):
                             st.error(f"Failed to process {uf.name}")
-                            with st.expander("Processing log"):
+                            with st.expander("Processing log", expanded=False):
                                 st.code('\n'.join(proc_logs) or "No output")
                             continue
 
@@ -698,7 +702,7 @@ with tab_upload:
                         mime="text/plain",
                         use_container_width=True,
                     )
-                    with st.expander("👁️ Preview Parsed Content"):
+                    with st.expander("👁️ Preview Parsed Content", expanded=False):
                         st.text(all_content[:5000])
                 else:
                     st.warning("No parseable content found.")
@@ -812,7 +816,7 @@ with tab_upload:
             artifacts = [f for f in os.listdir(analysis_dir)
                          if f not in ('meta.json', 'log_content.gz')]
             if artifacts:
-                with st.expander(f"Saved artifacts ({len(artifacts)} files)"):
+                with st.expander(f"Saved artifacts ({len(artifacts)} files)", expanded=False):
                     for af in sorted(artifacts):
                         fpath = os.path.join(analysis_dir, af)
                         sz = os.path.getsize(fpath)
@@ -1026,7 +1030,7 @@ with tab_modem:
         
         if not df_at.empty:
             # ── Filters row ──
-            with st.expander("🔎 Filter & Search", expanded=True):
+            with st.expander("🔎 Filter & Search", expanded=False):
                 with st.form("at_search_form"):
                     fc1, fc2, fc3 = st.columns(3)
                     with fc1:

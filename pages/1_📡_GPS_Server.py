@@ -124,17 +124,17 @@ def save_avl_path(avl_path: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Server singleton (session-state)
+#  Server singleton (cache_resource + session-state)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if 'server' not in st.session_state:
-    cfg = load_config()
-    srv = TeltonikaServer(port=cfg['server_port'], protocol=cfg['server_protocol'])
-    err = srv.start()
-    st.session_state.server_start_error = err
-    st.session_state.server = srv
+from modules.server_singleton import get_global_server, ensure_server_session
 
-server: TeltonikaServer = st.session_state.server
+# Ensure server is loaded
+srv = ensure_server_session()
+server: TeltonikaServer = srv
+
+if 'server_start_error' not in st.session_state:
+    st.session_state.server_start_error = None  # Handled by ensure_server_session, but just in case
 
 if 'io_selected_cols' not in st.session_state:
     st.session_state.io_selected_cols = []
@@ -497,7 +497,7 @@ def _raw_messages_view():
             else:
                 st.caption("No annotations")
 
-        with st.expander("📄 Raw hex (copyable)"):
+        with st.expander("📄 Raw hex (copyable)", expanded=False):
             st.code(msg['hex'], language=None)
 
 
@@ -912,7 +912,7 @@ with tab_interval:
                 m3.metric("Rate", f"{r['commands_sent']/expected*100:.0f}%")
 
             if r['errors']:
-                with st.expander("Errors"):
+                with st.expander("Errors", expanded=False):
                     for i, e in enumerate(r['errors'], 1):
                         st.text(f"{i}. {e}")
 

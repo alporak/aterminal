@@ -9,3 +9,7 @@ pandas
 plotly
 pystray
 Pillow
+openpyxl
+psutil
+numpy
+protobuf

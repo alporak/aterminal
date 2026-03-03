@@ -19,6 +19,13 @@ from datetime import date, timedelta
 
 # ─── Config ───────────────────────────────────────────────────────────
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+import sys
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+from modules.server_singleton import ensure_server_session
+ensure_server_session()
+
 JIRA_DIR = os.path.join(ROOT_DIR, "jira-time-tracker")
 JIRA_CFG = os.path.join(JIRA_DIR, "jira_config.json")
 DOMAIN = "teltonika-telematics.atlassian.net"
@@ -533,7 +540,7 @@ if rtype == "New Release":
                 st.rerun()
 
         # ── All versions with descriptions & release ticket links ─────
-        with st.expander(f"📦 All versions ({len(matching_vs)})"):
+        with st.expander(f"📦 All versions ({len(matching_vs)})", expanded=False):
             # Batch-fetch release tickets once (None = not yet loaded)
             rel_map = st.session_state.rc_rel_tickets
             if rel_map is None:
@@ -758,7 +765,7 @@ if ready and ver_name and tkt_summ:
             f'{_wiki_to_html(tkt_desc)}</div>',
             unsafe_allow_html=True,
         )
-        with st.expander("Edit raw wiki markup"):
+        with st.expander("Edit raw wiki markup", expanded=False):
             tkt_desc = st.text_area(
                 "raw", value=tkt_desc, height=140,
                 key="rc_ed_desc_alt", label_visibility="collapsed",

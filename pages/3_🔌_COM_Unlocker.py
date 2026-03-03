@@ -13,6 +13,9 @@ import psutil
 # Add parent directory for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from modules.server_singleton import ensure_server_session
+ensure_server_session()
+
 # Page config
 st.set_page_config(
     page_title="COM Port Unlocker",
@@ -33,7 +36,7 @@ def relaunch_streamlit_as_admin():
     try:
         import ctypes
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        app_entry = os.path.join(root_dir, "streamlit_app.py")
+        app_entry = os.path.join(root_dir, "Home.py")
         port = os.environ.get("STREAMLIT_SERVER_PORT", "8501")
         args = f'-m streamlit run "{app_entry}" --server.headless=true --server.port={port}'
         result = ctypes.windll.shell32.ShellExecuteW(
@@ -331,7 +334,7 @@ else:
 
 # Additional Info
 st.divider()
-with st.expander("📖 How to use"):
+with st.expander("📖 How to use", expanded=False):
     st.markdown("""
     ### Step-by-Step Guide
     

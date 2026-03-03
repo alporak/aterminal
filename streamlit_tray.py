@@ -52,7 +52,7 @@ class StreamlitTrayApp:
         if self.process is None or self.process.poll() is not None:
             print("Starting Streamlit...")
             self.process = subprocess.Popen(
-                [sys.executable, "-m", "streamlit", "run", "streamlit_app.py", 
+                [sys.executable, "-m", "streamlit", "run", "Home.py", 
                  "--server.headless=true"],
                 cwd=SCRIPT_DIR,
                 stdout=subprocess.PIPE,

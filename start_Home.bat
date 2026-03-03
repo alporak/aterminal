@@ -7,4 +7,4 @@ if %errorlevel% neq 0 (
 	exit /b
 )
 
-start "" python -m streamlit run streamlit_app.py --server.headless=true
+start "" python -m streamlit run Home.py --server.headless=true

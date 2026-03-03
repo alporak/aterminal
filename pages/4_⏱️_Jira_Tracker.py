@@ -167,22 +167,26 @@ def _download_attachments(email: str, token: str, ticket_key: str, dest_dir: str
             filename = att.get("filename", "unknown")
             if not file_url:
                 continue
+
+            file_path = os.path.join(dest_dir, filename)
+            
+            # Simple check: if file exists, we assume it's the same file and skip.
+            # (To handle same-name files properly, one would need to check size/hash or maintain a mapping,
+            # but for this use case, skipping existing filenames is the standard "resume/sync" behavior).
+            if os.path.exists(file_path):
+                continue
+
             file_resp = requests.get(file_url, auth=auth, stream=True)
             if file_resp.status_code == 200:
-                file_path = os.path.join(dest_dir, filename)
-                # Avoid overwriting – append number if file exists
-                if os.path.exists(file_path):
-                    base, ext = os.path.splitext(filename)
-                    counter = 1
-                    while os.path.exists(file_path):
-                        file_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
-                        counter += 1
                 with open(file_path, "wb") as f:
                     for chunk in file_resp.iter_content(chunk_size=8192):
                         f.write(chunk)
                 downloaded += 1
 
-        return True, f"Downloaded {downloaded}/{len(attachments)} attachment(s)."
+        if downloaded > 0:
+            return True, f"Downloaded {downloaded} new attachment(s)."
+        else:
+            return True, "No new attachments found."
 
     except Exception as e:
         return False, str(e)
@@ -257,27 +261,29 @@ def _render_ticket_directory_section():
     with col1:
         if st.button("📂 Open Ticket Directory", key="open_ticket_dir_btn", use_container_width=True):
             existing = _find_ticket_folder(tickets_folder, ticket_key)
-            if existing:
-                _open_in_explorer(existing)
-                st.success(f"Opened: `{existing}`")
-            else:
-                # Download attachments then open
-                if not email or not token:
-                    st.error("Jira credentials not configured. Set them in the sidebar.")
-                    return
+            dest_dir = existing if existing else os.path.join(tickets_folder, ticket_key)
 
-                dest = os.path.join(tickets_folder, ticket_key)
-                with st.spinner(f"Downloading attachments for {ticket_key}..."):
-                    ok, msg = _download_attachments(email, token, ticket_key, dest)
-
-                if ok:
-                    st.success(msg)
-                    if os.path.isdir(dest):
-                        _open_in_explorer(dest)
+            # unexpected error handling or just message
+            synced = False
+            if email and token:
+                with st.spinner(f"Syncing attachments for {ticket_key}..."):
+                    ok, msg = _download_attachments(email, token, ticket_key, dest_dir)
+                    if ok:
+                        if "No new attachments" not in msg:
+                            st.success(msg)
+                        synced = True
                     else:
-                        st.info("No files were downloaded; folder was not created.")
-                else:
-                    st.error(f"Download failed: {msg}")
+                        st.error(f"Sync failed: {msg}")
+
+            if os.path.exists(dest_dir) and os.path.isdir(dest_dir):
+                _open_in_explorer(dest_dir)
+                if not synced and not (email and token):
+                    st.warning("Opened local folder without syncing (credentials missing).")
+            else:
+                if not (email and token):
+                    st.error("Folder not found and cannot download (credentials missing).")
+                elif not os.path.exists(dest_dir):
+                    st.info("No files downloaded; folder was not created.")
 
     with col2:
         st.link_button(

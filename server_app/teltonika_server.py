@@ -656,6 +656,7 @@ class TeltonikaServer:
         self.interval_last_record: dict = {}
 
         self.lock = threading.Lock()
+        self.data_event = threading.Event()
         self._data_version = 0
 
     @property
@@ -671,6 +672,7 @@ class TeltonikaServer:
             if len(self.log_messages) > 1000:
                 self.log_messages = self.log_messages[:1000]
             self._data_version += 1
+            self.data_event.set()
 
     def _add_raw(self, direction: str, data: bytes, protocol: str):
         ts = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -681,6 +683,7 @@ class TeltonikaServer:
             if len(self.raw_messages) > 1000:
                 self.raw_messages = self.raw_messages[:1000]
             self._data_version += 1
+            self.data_event.set()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
     @staticmethod
@@ -862,6 +865,7 @@ class TeltonikaServer:
                             self.parsed_records = self.parsed_records[:2000]
                         if imei != 'Unknown':
                             self.interval_last_record[imei] = datetime.datetime.now()
+                        self.data_event.set()
 
                     # Enqueue any scheduled commands
                     self._enqueue_scheduled(imei)
@@ -945,6 +949,7 @@ class TeltonikaServer:
                             if len(self.parsed_records) > 2000:
                                 self.parsed_records = self.parsed_records[:2000]
                             self.interval_last_record[imei] = datetime.datetime.now()
+                            self.data_event.set()
 
                         self._enqueue_scheduled(imei)
                         self._try_send_queued_command_udp(imei)
@@ -1053,6 +1058,7 @@ class TeltonikaServer:
             })
             if len(self.command_history) > 1000:
                 self.command_history = self.command_history[:1000]
+            self.data_event.set()
 
         if qc and qc.callback:
             try:
@@ -1088,6 +1094,7 @@ class TeltonikaServer:
                                     'response': '⏱ TIMEOUT', 'protocol': self.protocol_mode,
                                     'duration_ms': -1,
                                 })
+                                self.data_event.set()
                         else:
                             self.log(f"Retry {qc.retries}/{qc.max_retries} for {imei}", "CMD")
                             qc.sent_time = None

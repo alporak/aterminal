@@ -7,9 +7,12 @@ import json
 import gzip
 import tempfile
 import zipfile
+import numpy as np
 import shutil
 import html as _html
 import glob as glob_mod
+import pickle
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -72,6 +75,40 @@ def save_toolkit_settings(settings):
         return False
 
 
+def launch_catcher(clg_path: str):
+    """Launch Easy Catcher with the given CLG file."""
+    cfg = load_toolkit_settings()
+    catcher_exe = cfg.get('catcher_path')
+    if not catcher_exe or not os.path.exists(catcher_exe):
+        # Fail silently or just warning if setting is missing, but user asked for it.
+        # st.toast("Catcher path not configured", icon="⚠️")
+        return
+    
+    if not os.path.exists(clg_path):
+        return
+
+    try:
+        # Launch independent process
+        if os.name == 'nt':
+            subprocess.Popen([catcher_exe, clg_path], cwd=os.path.dirname(catcher_exe), 
+                             creationflags=0x00000008, close_fds=True)
+        else:
+            subprocess.Popen([catcher_exe, clg_path], cwd=os.path.dirname(catcher_exe), close_fds=True)
+            
+        st.toast(f"🚀 Launched Catcher: {os.path.basename(clg_path)}")
+    except Exception as e:
+        st.error(f"Failed to launch Catcher: {e}")
+
+
+def find_clg_in_folder(folder_path: str) -> str | None:
+    """Return path to the first .clg file in the folder."""
+    if not folder_path or not os.path.exists(folder_path): return None
+    for f in os.listdir(folder_path):
+        if f.lower().endswith('.clg'):
+            return os.path.join(folder_path, f)
+    return None
+
+
 # ── Easy Catcher dump processor ─────────────────────────────────────
 EASY_CATCHER_OK = False
 PROCESS_DUMPS = None
@@ -127,6 +164,22 @@ def detect_ticket_from_filename(filename: str) -> str:
     return suffix
 
 
+def find_ticket_folder_for_file(filename: str) -> str | None:
+    """Find containing folder if *filename* exists inside a subdir of tickets_folder."""
+    cfg = load_toolkit_settings()
+    tickets_root = cfg.get('tickets_folder', '')
+    if tickets_root and os.path.exists(tickets_root):
+        try:
+            for entry in os.scandir(tickets_root):
+                if entry.is_dir():
+                    candidate = os.path.join(entry.path, filename)
+                    if os.path.exists(candidate):
+                        return entry.path
+        except Exception:
+            pass
+    return None
+
+
 def _jira_url(ticket_key: str) -> str | None:
     """Return a Jira browse URL if *ticket_key* looks like a ticket id."""
     if not _RX_TICKET.fullmatch(ticket_key):
@@ -171,11 +224,15 @@ def _save_index(entries):
 
 
 def save_analysis(raw_content: str, display_name: str, source_files: list,
-                  catcher_work_dir: str | None = None):
+                  catcher_work_dir: str | None = None,
+                  parsed_data: dict | None = None):
     """Persist a parsed analysis so it can be reopened later.
 
     Saves the raw concatenated log text as gzip (good compression for text)
     and copies any catcher artifacts (.clg, .log, .dmp) next to it.
+    
+    If 'parsed_data' is a dict, it will be pickled and gzipped to 'parsed_data.pkl.gz'.
+    
     Returns the analysis id (folder name).
     """
     _ensure_analyses_dir()
@@ -188,6 +245,15 @@ def save_analysis(raw_content: str, display_name: str, source_files: list,
     gz_path = os.path.join(analysis_dir, 'log_content.gz')
     with gzip.open(gz_path, 'wt', encoding='utf-8', compresslevel=6) as gz:
         gz.write(raw_content)
+
+    # 1.1 Save parsed data (pickle + gzip)
+    if parsed_data:
+        pkl_path = os.path.join(analysis_dir, 'parsed_data.pkl.gz')
+        try:
+            with gzip.open(pkl_path, 'wb', compresslevel=3) as gz:
+                pickle.dump(parsed_data, gz, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            print(f"Failed to save parsed cache: {e}")
 
     # 2. Copy catcher artefacts (CLG, LOG, DMP) if available
     artifacts_copied = []
@@ -229,34 +295,71 @@ def save_analysis(raw_content: str, display_name: str, source_files: list,
 
 
 def load_analysis(analysis_id: str):
-    """Load compressed log content and re-parse it.  Returns (content_str, meta) or (None, None)."""
+    """Load compressed log content and re-parse it.  Returns (content, meta, parsed_cache)."""
     analysis_dir = os.path.join(ANALYSES_DIR, analysis_id)
+    if not os.path.exists(analysis_dir):
+        return None, None, None
+
     gz_path = os.path.join(analysis_dir, 'log_content.gz')
     meta_path = os.path.join(analysis_dir, 'meta.json')
-    if not os.path.exists(gz_path):
-        return None, None
-    with gzip.open(gz_path, 'rt', encoding='utf-8') as gz:
-        content = gz.read()
+    pkl_path = os.path.join(analysis_dir, 'parsed_data.pkl.gz')
+    
+    # 1. Load content
+    content = None
+    if os.path.exists(gz_path):
+        try:
+            with gzip.open(gz_path, 'rt', encoding='utf-8') as gz:
+                content = gz.read()
+        except Exception:
+            pass
+
+    # 2. Load meta
     meta = {}
     if os.path.exists(meta_path):
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            meta = json.load(f)
-    return content, meta
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+        except Exception:
+            pass
+
+    # 3. Load parsed cache if available
+    parsed_cache = None
+    if os.path.exists(pkl_path):
+        try:
+            with gzip.open(pkl_path, 'rb') as gz:
+                parsed_cache = pickle.load(gz)
+        except Exception:
+            pass
+
+    return content, meta, parsed_cache
 
 
 def load_analysis_from_path(folder_path: str):
-    """Load an analysis from an arbitrary folder path."""
+    """Load from folder. Returns (content, meta, parsed_cache)."""
     gz_path = os.path.join(folder_path, 'log_content.gz')
     meta_path = os.path.join(folder_path, 'meta.json')
+    pkl_path = os.path.join(folder_path, 'parsed_data.pkl.gz')
+
     if not os.path.exists(gz_path):
-        return None, None
+        return None, None, None
+
     with gzip.open(gz_path, 'rt', encoding='utf-8') as gz:
         content = gz.read()
+
     meta = {}
     if os.path.exists(meta_path):
         with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
-    return content, meta
+            
+    parsed_cache = None
+    if os.path.exists(pkl_path):
+        try:
+            with gzip.open(pkl_path, 'rb') as gz:
+                parsed_cache = pickle.load(gz)
+        except Exception:
+            pass
+
+    return content, meta, parsed_cache
 
 
 def rename_analysis(analysis_id: str, new_name: str):
@@ -276,12 +379,79 @@ def rename_analysis(analysis_id: str, new_name: str):
     _save_index(idx)
 
 
+def restore_from_cache(parsed_cache, display_name):
+    """Restore session state from loaded cache."""
+    st.session_state['data_points'] = parsed_cache.get('data_points', [])
+    ev_list = parsed_cache.get('events', [])
+    log_list = parsed_cache.get('structured_logs', [])
+    modem_info = parsed_cache.get('modem_info', {})
+    
+    st.session_state['events'] = ev_list
+    st.session_state['structured_logs'] = log_list
+    st.session_state['modem_info'] = modem_info
+    
+    # Re-hydrate DataFrames
+    st.session_state['df_events'] = pd.DataFrame(ev_list) if ev_list else pd.DataFrame()
+    st.session_state['df_structured_logs'] = pd.DataFrame(log_list) if log_list else pd.DataFrame()
+    
+    # Restore or re-compute DF AT
+    # If the cache was created before we started saving df_at, we need to rebuild it
+    at_cmds = modem_info.get('at_commands', [])
+    if at_cmds:
+        df_at = pd.DataFrame(at_cmds)
+        if 'Category' not in df_at.columns: df_at['Category'] = ''
+        if 'Description' not in df_at.columns: df_at['Description'] = ''
+        
+        # Fast ConvID gen
+        conv_ids = []
+        current_id = 0
+        for d in df_at['Direction']:
+            if d == 'CMD': current_id += 1
+            conv_ids.append(current_id)
+        df_at['ConvID'] = conv_ids
+        st.session_state['df_at'] = df_at
+    else:
+        st.session_state['df_at'] = pd.DataFrame()
+
+    st.session_state['file_name'] = display_name
+
+
 # ── Parse & store helper ────────────────────────────────────────────
+@st.cache_data
+def get_df_from_records(records):
+    return pd.DataFrame(records)
+
 def parse_and_store(content, file_name):
     data_points, events, structured_logs, modem_info = parse_log(content)
+    # Store directly as DataFrames to avoid re-creation on every rerun
     st.session_state['data_points'] = data_points
+    # Store raw lists for legacy compatibility with other tabs
     st.session_state['events'] = events
     st.session_state['structured_logs'] = structured_logs
+    
+    # Pre-compute DataFrames for heavy tabs
+    st.session_state['df_events'] = pd.DataFrame(events) if events else pd.DataFrame()
+    st.session_state['df_structured_logs'] = pd.DataFrame(structured_logs) if structured_logs else pd.DataFrame()
+    
+    # Pre-compute AT Command DataFrame with ConvID
+    at_cmds = modem_info.get('at_commands', [])
+    if at_cmds:
+        df_at = pd.DataFrame(at_cmds)
+        # Ensure classification columns exist
+        for col in ['Category', 'Description']:
+            if col not in df_at.columns: df_at[col] = ''
+        
+        # Calculate ConvID once and stick it in the dataframe
+        conv_ids = []
+        current_id = 0
+        for d in df_at['Direction']:
+            if d == 'CMD': current_id += 1
+            conv_ids.append(current_id)
+        df_at['ConvID'] = conv_ids
+        st.session_state['df_at'] = df_at
+    else:
+        st.session_state['df_at'] = pd.DataFrame()
+
     st.session_state['modem_info'] = modem_info
     st.session_state['file_name'] = file_name
     return data_points, events, structured_logs, modem_info
@@ -470,6 +640,12 @@ with tab_upload:
                             all_content, display_name,
                             parsed_name_parts,
                             catcher_work_dir=last_catcher_work_dir,
+                            parsed_data={
+                                'data_points': data_points,
+                                'events': events,
+                                'structured_logs': structured_logs,
+                                'modem_info': modem_info
+                            }
                         )
                         st.session_state['current_analysis_id'] = aid
 
@@ -482,6 +658,48 @@ with tab_upload:
                     c5.metric("Log Lines", len(structured_logs))
 
                     st.success("Parsing complete — analysis saved. Check the other tabs.")
+
+                    # Auto-launch Catcher
+                    _an_dir = os.path.join(ANALYSES_DIR, aid)
+                    _clg_path = find_clg_in_folder(_an_dir)
+                    if _clg_path:
+                        launch_catcher(_clg_path)
+
+                    # Automatic Save to Source Folder
+                    if uploaded_files:
+                        try:
+                            _src_folder = find_ticket_folder_for_file(uploaded_files[0].name)
+                            if _src_folder:
+                                _base = os.path.splitext(uploaded_files[0].name)[0]
+                                _out_path = os.path.join(_src_folder, f"{_base}_parsed.txt")
+                                with open(_out_path, 'w', encoding='utf-8') as _f:
+                                    _f.write(all_content)
+                                st.success(f"💾 Automatically saved parsed log to: `{_out_path}`")
+                                
+                                # Auto-save CLG if available from Catcher processing
+                                if last_catcher_work_dir and os.path.isdir(last_catcher_work_dir):
+                                    for _f in os.listdir(last_catcher_work_dir):
+                                        if _f.lower().endswith('.clg'):
+                                            _src_clg = os.path.join(last_catcher_work_dir, _f)
+                                            _dest_clg = os.path.join(_src_folder, f"{_base}.clg")
+                                            # Avoid overwriting if possible or just overwrite? User implied "copy it".
+                                            # Using shutil.copy2
+                                            shutil.copy2(_src_clg, _dest_clg)
+                                            st.success(f"💾 Automatically saved CLG to: `{_dest_clg}`")
+                            else:
+                                st.caption("Note: Auto-save skipped (Original file not found in tickets folder).")
+                        except Exception as _e:
+                            st.warning(f"Auto-save failed: {_e}")
+
+                    st.download_button(
+                        label="💾 Download Parsed TXT",
+                        data=all_content,
+                        file_name=f"{analysis_name.strip() or 'log'}_parsed.txt",
+                        mime="text/plain",
+                        use_container_width=True,
+                    )
+                    with st.expander("👁️ Preview Parsed Content"):
+                        st.text(all_content[:5000])
                 else:
                     st.warning("No parseable content found.")
     else:
@@ -528,13 +746,48 @@ with tab_upload:
 
         with rc1:
             if st.button("🔄 Load selected", use_container_width=True):
-                with st.spinner("Loading & re-parsing..."):
-                    content, meta = load_analysis(sel_entry['id'])
-                    if content:
+                with st.spinner("Loading..."):
+                    content, meta, parsed_cache = load_analysis(sel_entry['id'])
+                    
+                    if parsed_cache:
                         display = meta.get('name', sel_entry['id'])
-                        parse_and_store(content, display)
+                        restore_from_cache(parsed_cache, display)
                         st.session_state['current_analysis_id'] = sel_entry['id']
-                        st.success(f"Loaded: {display}")
+                        st.success(f"Restored: {display} (Cached)")
+                        
+                        _clg = find_clg_in_folder(os.path.join(ANALYSES_DIR, sel_entry['id']))
+                        if _clg: launch_catcher(_clg)
+                        
+                        st.rerun()
+                    elif content:
+                        st.info("Cache miss: Re-parsing logs...")
+                        display = meta.get('name', sel_entry['id'])
+                        data_points, events, structured_logs, modem_info = parse_and_store(content, display)
+                        
+                        # Save cache for next time
+                        try:
+                            parsed_cache = {
+                                'data_points': data_points,
+                                'events': events,
+                                'structured_logs': structured_logs,
+                                'modem_info': modem_info
+                            }
+                            # We don't want to create a new folder, just update the existing one
+                            # We can reuse save_analysis logic but we need the path.
+                            # Or just construct the path manually since we know the ID.
+                            analysis_dir = os.path.join(ANALYSES_DIR, sel_entry['id'])
+                            pkl_path = os.path.join(analysis_dir, 'parsed_data.pkl.gz')
+                            with gzip.open(pkl_path, 'wb', compresslevel=3) as gz:
+                                pickle.dump(parsed_cache, gz, protocol=pickle.HIGHEST_PROTOCOL)
+                        except Exception as e:
+                            print(f"Failed to backfill cache: {e}")
+                            
+                        st.session_state['current_analysis_id'] = sel_entry['id']
+                        st.success(f"Loaded: {display} (Cache created)")
+
+                        _clg = find_clg_in_folder(os.path.join(ANALYSES_DIR, sel_entry['id']))
+                        if _clg: launch_catcher(_clg)
+
                         st.rerun()
                     else:
                         st.error("Analysis file not found or corrupted.")
@@ -576,16 +829,46 @@ with tab_upload:
             key='manual_analysis_path',
         )
         if folder_path and st.button("📂 Open", key='open_manual'):
-            with st.spinner("Loading & re-parsing..."):
-                content, meta = load_analysis_from_path(folder_path)
-                if content:
+            with st.spinner("Loading..."):
+                content, meta, parsed_cache = load_analysis_from_path(folder_path)
+                
+                if parsed_cache:
                     display = meta.get('name', os.path.basename(folder_path))
-                    parse_and_store(content, display)
+                    restore_from_cache(parsed_cache, display)
                     st.session_state['current_analysis_id'] = meta.get('id', '')
-                    st.success(f"Loaded: {display}")
+                    st.success(f"Restored: {display} (Cached)")
+                    
+                    _clg = find_clg_in_folder(folder_path)
+                    if _clg: launch_catcher(_clg)
+                    
+                    st.rerun()
+                elif content:
+                    st.info("Cache miss: Re-parsing logs...")
+                    display = meta.get('name', os.path.basename(folder_path))
+                    data_points, events, structured_logs, modem_info = parse_and_store(content, display)
+                    
+                    try:
+                        parsed_cache = {
+                            'data_points': data_points,
+                            'events': events,
+                            'structured_logs': structured_logs,
+                            'modem_info': modem_info
+                        }
+                        pkl_path = os.path.join(folder_path, 'parsed_data.pkl.gz')
+                        with gzip.open(pkl_path, 'wb', compresslevel=3) as gz:
+                            pickle.dump(parsed_cache, gz, protocol=pickle.HIGHEST_PROTOCOL)
+                    except Exception as e:
+                        print(f"Failed to backfill cache for manual open: {e}")
+
+                    st.session_state['current_analysis_id'] = meta.get('id', '')
+                    st.success(f"Loaded: {display} (Cache created)")
+                    
+                    _clg = find_clg_in_folder(folder_path)
+                    if _clg: launch_catcher(_clg)
+                    
                     st.rerun()
                 else:
-                    st.error("No valid analysis found in that folder (missing log_content.gz).")
+                    st.error("No valid analysis found in that folder.")
 
 
 # ━━━━━━━━━━━━ TAB: Timeline ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -738,52 +1021,72 @@ with tab_modem:
 
         # ── AT Commands ──
         st.subheader("AT Commands")
-        at_cmds = modem_info.get('at_commands', [])
-        if at_cmds:
-            df_at = pd.DataFrame(at_cmds)
-
-            # Ensure classification columns exist (backwards compat)
-            if 'Category' not in df_at.columns:
-                df_at['Category'] = 'Other'
-            if 'Description' not in df_at.columns:
-                df_at['Description'] = ''
-            if 'Group' not in df_at.columns:
-                df_at['Group'] = range(len(df_at))
-
+        # Use pre-computed DataFrame from session state
+        df_at = st.session_state.get('df_at', pd.DataFrame())
+        
+        if not df_at.empty:
             # ── Filters row ──
-            fc1, fc2, fc3 = st.columns(3)
-
-            with fc1:
-                at_filter = st.text_input(
-                    "🔍 Filter AT commands",
-                    placeholder="CSQ, COPS, CREG, CIMI, QNWINFO...",
-                )
-
-            with fc2:
-                all_categories = sorted(set(df_at['Category'].dropna()) - {''})
-                cat_filter = st.multiselect(
-                    "Category",
-                    options=all_categories,
-                    default=[],
-                    placeholder="All categories",
-                )
-
-            with fc3:
-                dir_filter = st.multiselect(
-                    "Direction",
-                    options=['CMD', 'RSP', 'INFO'],
-                    default=['CMD', 'RSP', 'INFO'],
-                )
+            with st.expander("🔎 Filter & Search", expanded=True):
+                with st.form("at_search_form"):
+                    fc1, fc2, fc3 = st.columns(3)
+                    with fc1:
+                        at_filter = st.text_input(
+                            "Search content",
+                            placeholder="CSQ, COPS, CREG...",
+                        )
+                    with fc2:
+                        # Cached unique values
+                        cats = sorted(df_at['Category'].unique())
+                        cat_filter = st.multiselect(
+                            "Category",
+                            options=cats,
+                            default=[],
+                            placeholder="All categories",
+                        )
+                    with fc3:
+                        dir_filter = st.multiselect(
+                            "Show Directions",
+                            options=['CMD', 'RSP', 'INFO'],
+                            default=['CMD', 'RSP', 'INFO'],
+                        )
+                    submitted = st.form_submit_button("Search")
 
             # Apply filters
-            df_at_view = df_at[df_at['Direction'].isin(dir_filter)]
-            if at_filter:
-                mask = df_at_view['Content'].str.contains(at_filter, case=False, na=False)
-                df_at_view = df_at_view[mask]
-            if cat_filter:
-                df_at_view = df_at_view[df_at_view['Category'].isin(cat_filter)]
+            # 1. Base filter by Text & Category
+            
+            # Optimized search: if user searches, we find match indices, get their ConvIDs
+            # calculate the mask for the WHOLE conversation efficiently
+            active_ids = None
 
-            st.write(f"{len(df_at_view)} entries shown (of {len(df_at)} total)")
+            if at_filter:
+                match_mask = df_at['Content'].str.contains(at_filter, case=False, na=False)
+                active_ids = df_at.loc[match_mask, 'ConvID'].unique()
+            
+            if cat_filter:
+                # Filter first by cat, find those IDs
+                cat_mask = df_at['Category'].isin(cat_filter)
+                cat_ids = df_at.loc[cat_mask, 'ConvID'].unique()
+                if active_ids is not None:
+                    active_ids = np.intersect1d(active_ids, cat_ids)
+                else:
+                    active_ids = cat_ids
+
+            if at_filter or cat_filter:
+                if active_ids is not None and len(active_ids) > 0:
+                    df_context = df_at[df_at['ConvID'].isin(active_ids)] # view is fine, no copy needed yet
+                else:
+                    df_context = pd.DataFrame(columns=df_at.columns)
+            else:
+                # No filters active, show all
+                df_context = df_at
+            
+            # Final view filter (hide INFO if unchecked)
+            if not df_context.empty:
+                df_at_view = df_context[df_context['Direction'].isin(dir_filter)]
+            else:
+                df_at_view = df_context
+
+            st.write(f"{len(df_at_view)} entries shown")
 
             # ── View mode toggle ──
             view_mode = st.radio(
@@ -805,28 +1108,42 @@ with tab_modem:
                     }
                 )
             else:
-                # Conversation view: group by TX/RX pairs
-                if 'Group' in df_at_view.columns:
-                    groups = df_at_view.groupby('Group', sort=False)
-                    conv_lines = []
-                    for gid, grp in groups:
-                        cmds = grp[grp['Direction'] == 'CMD']
-                        rsps = grp[grp['Direction'].isin(['RSP', 'INFO'])]
-                        cmd_str = ', '.join(cmds['Content'].tolist()) if not cmds.empty else ''
-                        rsp_str = ' | '.join(rsps['Content'].tolist()) if not rsps.empty else ''
-                        ts = grp['Timestamp'].iloc[0] if not grp.empty else ''
-                        cat = cmds['Category'].iloc[0] if not cmds.empty else (
-                            rsps['Category'].iloc[0] if not rsps.empty else '')
-                        desc = cmds['Description'].iloc[0] if not cmds.empty else (
-                            rsps['Description'].iloc[0] if not rsps.empty else '')
-                        conv_lines.append({
-                            'Time': ts,
-                            'Command': cmd_str,
-                            'Response': rsp_str,
-                            'Category': cat,
-                            'Description': desc,
-                        })
-                    df_conv = pd.DataFrame(conv_lines)
+                # Conversation view: group by ConvID (Vectorized)
+                # Use ConvID if available, else fall back to Group or just range
+                group_col = 'ConvID' if 'ConvID' in df_at_view.columns else 'Group'
+                
+                if group_col in df_at_view.columns:
+                    # 1. Prepare base data
+                    # We want one row per conversation.
+                    # This DF is already filtered by what the user searched.
+                    
+                    if len(df_at_view) > 20000:
+                        st.warning("Too many results for conversation view. Showing first 2000.")
+                        df_at_view = df_at_view.iloc[:10000] # Safe limit for groupby
+                    
+                    df_view_copy = df_at_view.copy()
+                    
+                    # Separate CMD vs RSP content
+                    df_view_copy['CmdContent'] = df_view_copy['Content'].where(df_view_copy['Direction'] == 'CMD', None)
+                    df_view_copy['RspContent'] = df_view_copy['Content'].where(df_view_copy['Direction'].isin(['RSP', 'INFO']), None)
+                    
+                    # Aggregate
+                    # this reduces ~30k groups to 30k rows effectively
+                    df_conv = df_view_copy.groupby(group_col, sort=False).agg({
+                        'Timestamp': 'first',
+                        'Category': 'first',
+                        'Description': 'first',
+                        'CmdContent': lambda x: ', '.join(x.dropna().astype(str)),
+                        'RspContent': lambda x: ' | '.join(x.dropna().astype(str)),
+                    }).reset_index()
+                    
+                    # Rename for display
+                    df_conv.rename(columns={
+                        'CmdContent': 'Command',
+                        'RspContent': 'Response',
+                        'Timestamp': 'Time'
+                    }, inplace=True)
+                    
                     if not df_conv.empty:
                         st.dataframe(
                             df_conv, use_container_width=True, height=500,
@@ -900,19 +1217,29 @@ with tab_map:
 
 # ━━━━━━━━━━━━ TAB: Events Table ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab_events:
-    if 'events' not in st.session_state or not st.session_state['events']:
+    df_raw_ev = st.session_state.get('df_events', pd.DataFrame())
+    if df_raw_ev.empty:
         st.info("No data. Upload and parse logs first.")
     else:
-        events = filtered_events(st.session_state['events'])
-        if not events:
+        # Apply sidebar filters (vectorized)
+        # FILTER_MAP keys match 'Type' values or default to True
+        # Get list of allowed types based on current checkbox states
+        valid_types = [t for t in df_raw_ev['Type'].unique() if FILTER_MAP.get(t, True)]
+        df_ev = df_raw_ev[df_raw_ev['Type'].isin(valid_types)].copy()
+        
+        if df_ev.empty:
             st.info("All events filtered out. Adjust sidebar filters.")
         else:
-            df_ev = pd.DataFrame(events)
+            with st.form("events_filter_form"):
+                col_s1, col_s2 = st.columns([3, 1])
+                with col_s1:
+                    search = st.text_input("Search events", placeholder="Type to search...", label_visibility="collapsed")
+                with col_s2:
+                    submitted = st.form_submit_button("🔍 Search", use_container_width=True)
 
-            search = st.text_input("🔍 Search events", placeholder="Search...")
             if search:
-                mask = df_ev.astype(str).apply(
-                    lambda row: row.str.contains(search, case=False, na=False).any(), axis=1)
+                # Optimized search across all columns
+                mask = df_ev.astype(str).agg(' '.join, axis=1).str.contains(search, case=False, na=False)
                 df_ev = df_ev[mask]
                 st.write(f"{len(df_ev)} matches")
 
@@ -937,29 +1264,42 @@ with tab_events:
 
 # ━━━━━━━━━━━━ TAB: Raw Log ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab_raw:
-    if 'structured_logs' not in st.session_state or not st.session_state['structured_logs']:
+    df_logs_raw = st.session_state.get('df_structured_logs', pd.DataFrame())
+    
+    if df_logs_raw.empty:
         st.info("No data. Upload and parse logs first.")
     else:
-        logs = st.session_state['structured_logs']
-        df_logs = pd.DataFrame(logs)
+        # Work on a view/copy
+        df_logs = df_logs_raw
         st.write(f"{len(df_logs)} log lines")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            all_mods = sorted(set(df_logs['Module'].dropna()) - {''})
-            sel_mods = st.multiselect("Filter by Module", options=all_mods, default=[])
-            if sel_mods:
-                df_logs = df_logs[df_logs['Module'].isin(sel_mods)]
-        with c2:
-            all_types = sorted(set(df_logs['Type'].dropna()) - {''})
-            sel_types = st.multiselect("Filter by Type", options=all_types, default=[])
-            if sel_types:
-                df_logs = df_logs[df_logs['Type'].isin(sel_types)]
+        with st.form("raw_log_filters"):
+            c1, c2 = st.columns(2)
+            # Use cached unique values if possible, or calculate once
+            # Since df_logs_raw is constant per parsing, uniques are constant
+            mods = sorted(df_logs['Module'].dropna().unique())
+            types = sorted(df_logs['Type'].dropna().unique())
+            
+            with c1:
+                sel_mods = st.multiselect("Filter by Module", options=mods, default=[])
+            with c2:
+                sel_types = st.multiselect("Filter by Type", options=types, default=[])
 
-        search_log = st.text_input("🔍 Search log content", placeholder="Search messages...")
+            search_log = st.text_input("Search content", placeholder="Search messages...", label_visibility="collapsed")
+            submitted = st.form_submit_button("🔍 Apply Filters", use_container_width=True)
+
+        # Apply filters
+        start_time = datetime.now()
+        if sel_mods:
+            df_logs = df_logs[df_logs['Module'].isin(sel_mods)]
+        if sel_types:
+            df_logs = df_logs[df_logs['Type'].isin(sel_types)]
+
         if search_log:
-            df_logs = df_logs[df_logs['Message'].str.contains(search_log, case=False, na=False)]
-            st.write(f"{len(df_logs)} matches")
+             df_logs = df_logs[df_logs['Message'].str.contains(search_log, case=False, na=False)]
+             st.caption(f"Search took {(datetime.now()-start_time).total_seconds():.2f}s")
+        
+        st.write(f"{len(df_logs)} matches")
 
         st.dataframe(
             df_logs, use_container_width=True, height=600,

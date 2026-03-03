@@ -257,42 +257,56 @@ def _sidebar_live():
 
 
 # ── Live Data table ───────────────────────────────────────────────────────────
-@st.fragment(run_every="1s")
-def _live_data_table():
+@st.fragment
+def _live_data_fragment(mode: str, interval: float):
     srv: TeltonikaServer = st.session_state.get('server')
     if not srv:
         return
 
+    # Render current state immediately
     with srv.lock:
         records = list(srv.parsed_records)
     selected_ios = st.session_state.get('io_selected_cols', [])
 
     if not records:
         st.info("Waiting for data…")
-        return
+    else:
+        rows = []
+        for rec in records:
+            row = {
+                'IMEI': rec.get('IMEI', ''),
+                'Proto': rec.get('Protocol', ''),
+                'Timestamp': rec.get('Timestamp', ''),
+                'Lat': rec.get('Latitude', ''),
+                'Lon': rec.get('Longitude', ''),
+                'Speed': rec.get('Speed', ''),
+                'Angle': rec.get('Angle', ''),
+                'Sats': rec.get('Satellites', ''),
+                'Alt': rec.get('Altitude', ''),
+                'Prio': rec.get('Priority', ''),
+                'EvtIO': rec.get('Event_IO', ''),
+            }
+            io = rec.get('IO_Data', {})
+            for iid in selected_ios:
+                row[io_name(iid)] = io.get(iid, '')
+            rows.append(row)
 
-    rows = []
-    for rec in records:
-        row = {
-            'IMEI': rec.get('IMEI', ''),
-            'Proto': rec.get('Protocol', ''),
-            'Timestamp': rec.get('Timestamp', ''),
-            'Lat': rec.get('Latitude', ''),
-            'Lon': rec.get('Longitude', ''),
-            'Speed': rec.get('Speed', ''),
-            'Angle': rec.get('Angle', ''),
-            'Sats': rec.get('Satellites', ''),
-            'Alt': rec.get('Altitude', ''),
-            'Prio': rec.get('Priority', ''),
-            'EvtIO': rec.get('Event_IO', ''),
-        }
-        io = rec.get('IO_Data', {})
-        for iid in selected_ios:
-            row[io_name(iid)] = io.get(iid, '')
-        rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=550)
+        st.caption(f"{len(records)} records · live ({mode})")
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=550)
-    st.caption(f"{len(records)} records · live")
+    # Wait logic (must be at the end to allow render first)
+    if mode == "Blocking (Instant)":
+        # Wait for event signal (up to 0.5s to keep UI responsive to stop)
+        if srv.data_event.wait(timeout=0.5):
+            srv.data_event.clear()
+            st.rerun()
+        else:
+            # Timeout - loop again to check if user stopped or changed tabs
+            st.rerun()
+            
+    else: # Fast Polling
+        time.sleep(interval)
+        st.rerun()
 
 
 # ── Recent command responses ──────────────────────────────────────────────────
@@ -684,7 +698,21 @@ with tab_data:
             st.session_state.io_selected_cols = selected_ios
 
     # Data table (auto-refreshing fragment)
-    _live_data_table()
+    c_run, c_poll = st.columns([2, 1])
+    with c_run:
+        blocking = st.checkbox("⚡ Live Mode (Instant)",
+                              value=st.session_state.get('live_mode_active', False),
+                              key="live_mode_active",
+                              help="Keeps connection open for instant updates. Blocks until unchecked.")
+    with c_poll:
+        interval = st.number_input("Poll Interval (s)", 0.1, 10.0, 1.0, 0.1,
+                                  disabled=blocking, key="poll_interval", label_visibility="collapsed")
+    
+    if blocking:
+        st.warning("⚠️ Live Mode active: Uncheck before navigating away to ensure cleanup.")
+        _live_data_fragment("Blocking (Instant)", 0.0)
+    else:
+        _live_data_fragment("Polling", interval)
 
 
 # ─── Tab 2: Send Commands ────────────────────────────────────────────────────

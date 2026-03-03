@@ -1,20 +1,7 @@
-logs/
-server_logs/
-devices.db
-dist/
-build/
-/alp.py
-/config.json
-/gps_map_render.html
-/main.spec
-/python_files_dump.txt
-/.gitignore
-/config.json
-/upx-temp/
-
-# Python cache files
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+modules/__pycache__/
+Log*
+*config*
+toolkit_settings.json
+output/*
+.vscode/*

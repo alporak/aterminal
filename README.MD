@@ -1,23 +1,73 @@
-# Teltonika Device Server v2.0
+# 🛠️ ALPS Toolkit
 
-## Overview
-
-This application is a complete rewrite of the original procedural server script. It provides a robust, high-performance TCP/UDP server for managing Teltonika tracking devices, now featuring a user-friendly graphical interface built with PySide6.
-
-The server can handle multiple device connections simultaneously, decode various Teltonika data codecs, manage file transfers (including FOTA updates), and log all activity with high-precision timestamps.
+A collection of utilities for Teltonika device development, built with Streamlit and good intentions.
 
 ## Features
 
-- **Dual Protocol Support**: Runs as a TCP or UDP server, configurable with a single click.
-- **Graphical User Interface**: A simple and intuitive GUI to manage the server, view logs, and interact with devices. No more command-line hassle.
-- **Robust Configuration**: All settings are managed in a human-readable `config.json` file. The GUI provides a settings dialog to manage this configuration easily.
-- **Device Management**:
-    - Automatically detects and lists connected devices by their IMEI.
-    - Ability to assign custom names to devices (e.g., "Truck-102").
-    - Device names and IMEIs are stored in a local `devices.db` (SQLite) and are remembered across application restarts.
-- **Real-time Logging**:
-    - Live log view for all server events, connection status, and raw/decoded data packets.
-    - Timestamps with millisecond precision for accurate event tracking.
+### 📡 GPS Server
+- Real-time TCP/UDP listener for Teltonika GPS devices (Codec 8/8E/12/13).
+- Live data feed with auto-refresh (no full page reload).
+- Parsing of AVL IDs, IO elements, and raw hex (with color-coded breakdown).
+- Command sending (TCP/UDP) with queueing.
+
+### 🔍 Log Parser
+- Parse `Teltonika Catcher` logs (.clg, .txt) and device dumps.
+- Visual timeline of connection events, record sending, and errors.
+- Extract AT commands and modem responses.
+- Map visualization of GPS points from logs.
+
+### 🔌 COM Unlocker
+- Identify which process is locking your COM port.
+- Kill the locking process directly from the UI.
+- Restart the device driver if the port is stuck in kernel limbo.
+
+### ⏱️ Jira Tracker
+- Log work to Jira tickets efficiently.
+- "Standup" mode: quickly log meeting times.
+- View daily/weekly progress bars.
+- Open local folders associated with tickets.
+
+### 🚀 Release Creator
+- Wizard for creating new Firmware versions in Jira.
+- Auto-generates release tickets with proper version links.
+- Handles standard Release vs Revision workflows.
+
+## Installation
+
+1.  **Clone the repository**:
+    ```bash
+    git clone <http://your-repo-url>
+    cd alps-toolkit
+    ```
+
+2.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+### Option 1: System Tray (Windows)
+Run the script to start the toolkit in the background with a system tray icon:
+```bash
+python streamlit_tray.py
+```
+Or double-click `start_Home_hidden.vbs`.
+
+### Option 2: Direct Launch
+Run Streamlit directly in your terminal:
+```bash
+streamlit run Home.py
+```
+Or double-click `start_Home.bat`.
+
+## Configuration
+- **GPS Server**: Config is stored in `toolkit_settings.json` (auto-created).
+- **Jira**: Credentials are stored in `jira-time-tracker/jira_config.json`.
+
+---
+*Built with Streamlit & Spite.*
+
     - Color-coded logs for different event types (Info, Warning, Error, Data).
 - **Log Export**: Easily export the entire session log to a text file for archival or analysis.
 - **Serial Port Monitor**: A built-in terminal to monitor any local serial (COM) port, useful for debugging hardware or connected peripherals.

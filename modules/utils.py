@@ -235,7 +235,7 @@ def get_marker_color(speed, ignition):
         return '#FF8C00' # Orange = Idling
     return '#00FF00'     # Green = Moving
 
-def parse_log(content_str):
+def parse_log(content_str, progress_callback=None):
     data_points = []
     events = []
     structured_logs = []
@@ -243,6 +243,7 @@ def parse_log(content_str):
         'signal_readings': [],
         'at_commands': [],
         'device_identity': {},
+        'records': [],
     }
     device_identity = modem_info['device_identity']
     
@@ -311,6 +312,37 @@ def parse_log(content_str):
     rx_cops_val = re.compile(r'\+COPS:\s*\d+,\s*\d+,\s*"([^"]+)"(?:,\s*(\d+))?')
     rx_creg_val = re.compile(r'\+C(?:E)?REG:\s*(?:\d+,\s*)?(\d+)(?:,\s*"([^"]*)")?(?:,\s*"([^"]*)")?(?:,\s*(\d+))?')
     rx_rec_send = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?(\d{1,2})\s*=>\s*(\d{1,2})')
+    # CHANGE.STATE text-based transitions: [REC.SEND.1] [CHANGE.STATE.0842] Server: 0, check link => send imei
+    rx_rec_send_change = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?\[CHANGE\.STATE\.(\d+)\]\s*Server:\s*(\d),\s*(.+?)\s*=>\s*(.+?)\s*$')
+    # Key rec-send events (text messages)
+    rx_rec_send_accepted_imei = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?server accepted imei')
+    rx_rec_send_accepted_recs = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?server accepted records')
+    rx_rec_send_packed = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?records packed:\s*(\d+)')
+    rx_rec_send_sent = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?Sent\s+(\d+)\s+records\s+of\s+min\s+required\s+(\d+)')
+    rx_rec_send_starting = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?Starting periodic data sending')
+    rx_rec_send_enough = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?Have enough records to send')
+    rx_rec_send_periodic = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?Mode:\s*(\d+)/(\w[\w\s]*?)\.\s*(?:Next periodic data sending:\s*(\d+)\s*/\s*(\d+)|Period:\s*(\d+))')
+    rx_rec_send_link_tmo = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?link tmo detected.*?server\s*(\d)')
+    rx_rec_send_queue = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.SEND\.(\d)\].*?queueing recsend\d+ task job type:\s*(\d+)/(\w+)')
+    rx_rec_gen = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.GEN\]\s+(.*)')
+    rx_avl_id = re.compile(r'Event AVL ID\s*:\s*(\d+)')
+
+    # Record Content block fields (multiline, from REC.GEN trace)
+    rx_rec_content_start = re.compile(r'Record Content:')
+    rx_rec_priority = re.compile(r'Priority\s*:\s*(\d+)')
+    rx_rec_latitude = re.compile(r'Latitude\s*:\s*([\-\d.]+)')
+    rx_rec_longitude = re.compile(r'Longitude\s*:\s*([\-\d.]+)')
+    rx_rec_altitude = re.compile(r'Altitude\s*:\s*([\-\d]+)')
+    rx_rec_angle = re.compile(r'Angle\s*:\s*([\-\d]+)')
+    rx_rec_speed = re.compile(r'(?<![G])Speed\s*:\s*(\d+)')
+    rx_rec_hdop = re.compile(r'HDOP\s*:\s*([\d.]+)')
+    rx_rec_sat = re.compile(r'SatInUse\s*:\s*(\d+)')
+    rx_rec_fix = re.compile(r'GPS Fix\s*:\s*(\d+)')
+    rx_rec_gspeed = re.compile(r'GSpeed\s*:\s*(\d+),\s*src:\s*(\S+)')
+    rx_rec_io = re.compile(r'IO ID\[\s*(\d+)\](?:\s*Length\[\s*\d+\])?\s*:\s*(.*)')
+    rx_rec_size = re.compile(r'Record Size:\s*(\d+)\s*Bytes')
+    rx_rec_save = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[REC\.GEN\].*?(Eventual|Periodic)\s+(\w+)\s+priority\s+record\s+save\s+queued')
+    rx_rec_timestamp = re.compile(r'Timestamp\s*:\s*(\d+)')
     rx_gprs_ev = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[GPRS\.CMD\]\s+(.*)')
     rx_modem_change = re.compile(r'(\d{2}:\d{2}:\d{2}:\d{3}).*?\[MODEM\].*?[Ss]tate.*?changed.*?(\w+)\s*->\s*(\w+)')
     rx_status_operator = re.compile(r'GSM Operator\s*:\s*(\d+)')
@@ -362,6 +394,11 @@ def parse_log(content_str):
     _last_at_cmd_base = ''   # e.g. 'CIMI', 'CREG', 'CSQ'
     _at_group_counter = 0    # groups TX/RX pairs
 
+    # Record generation multiline accumulator
+    _rec_accumulating = False       # True while inside a Record Content block
+    _rec_current = None             # Dict being built for current record
+    _rec_start_line = 0             # Line number where record block started
+
     # Default date
     current_date_str = datetime.now().strftime('%Y/%m/%d')
     
@@ -370,6 +407,7 @@ def parse_log(content_str):
         return f"{current_date_str} {time_str}"
 
     lines = content_str.splitlines()
+    total_lines = len(lines)
     
     last_timestamp_str = "00:00:00:000"
     
@@ -379,8 +417,15 @@ def parse_log(content_str):
     last_parsed_level = ""
 
     for i, line in enumerate(lines):
+        # Progress callback
+        if progress_callback and i % 2000 == 0:
+            progress_callback(i / total_lines)
+
         line = line.strip()
         if not line: continue
+
+        match_at_cmd = None
+        match_at_rsp = None
             
         # --- 0. FAST STRUCTURE PARSE ---
         # Try to parse structure first to populate the raw viewer
@@ -440,196 +485,181 @@ def parse_log(content_str):
         # 1. FIRMWARE STATE DETECTION (TRIP) & IGNITION
         
         # A. Explicit Ignition Change
-        match_ign = rx_ign_change.search(line)
-        if match_ign:
-            ts, old_v, new_v, phy = match_ign.groups()
-            final_ts = resolve_ts(line, ts)
-            new_ign_bool = (new_v == '1')
-            
-            if new_ign_bool != current_ignition:
-                current_ignition = new_ign_bool
-                events.append({
-                    'LineNum': i + 1,
-                    'Timestamp': final_ts,
-                    'Type': 'Ignition',
-                    'Value': 'ON' if new_ign_bool else 'OFF',
-                    'Details': f'Ignition Changed ({old_v}->{new_v})',
-                    'Log': line.strip()
-                })
+        if 'Ignition changed' in line:
+            match_ign = rx_ign_change.search(line)
+            if match_ign:
+                ts, old_v, new_v, phy = match_ign.groups()
+                final_ts = resolve_ts(line, ts)
+                new_ign_bool = (new_v == '1')
+                
+                if new_ign_bool != current_ignition:
+                    current_ignition = new_ign_bool
+                    events.append({
+                        'LineNum': i + 1,
+                        'Timestamp': final_ts,
+                        'Type': 'Ignition',
+                        'Value': 'ON' if new_ign_bool else 'OFF',
+                        'Details': f'Ignition Changed ({old_v}->{new_v})',
+                        'Log': line.strip()
+                    })
 
-        # B. Trip Periodic Info
-        match_trip = rx_trip_periodic.search(line)
-        if match_trip:
-            ts, state, spd, mov, ign = match_trip.groups()
-            final_ts = resolve_ts(line, ts)
-            
-            # Sync Ignition
-            new_ign_bool = (ign == 'ON')
-            if new_ign_bool != current_ignition:
-                current_ignition = new_ign_bool
+        # B. Trip Periodic & Start/End
+        if '[TRIP]' in line:
+            # Trip Periodic Info
+            match_trip = rx_trip_periodic.search(line)
+            if match_trip:
+                ts, state, spd, mov, ign = match_trip.groups()
+                final_ts = resolve_ts(line, ts)
+                
+                # Sync Ignition
+                new_ign_bool = (ign == 'ON')
+                if new_ign_bool != current_ignition:
+                    current_ignition = new_ign_bool
+                    events.append({
+                        'LineNum': i + 1,
+                        'Timestamp': final_ts,
+                        'Type': 'Ignition',
+                        'Value': 'ON' if new_ign_bool else 'OFF',
+                        'Details': 'Trip Periodic Sync',
+                        'Log': line.strip()
+                    })
+                
+                # Sync Trip State (Stop/Moving)
+                if state != current_trip_state:
+                    current_trip_state = state
+                    events.append({
+                        'LineNum': i + 1,
+                        'Timestamp': final_ts,
+                        'Type': 'Trip Status',
+                        'Value': state,
+                        'Details': f'State Changed to {state} (Spd:{spd})',
+                        'Log': line.strip()
+                    })
+
+            # Trip Start
+            match_start = rx_trip_start.search(line)
+            if match_start:
+                ts, spd, mov, ign = match_start.groups()
                 events.append({
                     'LineNum': i + 1,
-                    'Timestamp': final_ts,
-                    'Type': 'Ignition',
-                    'Value': 'ON' if new_ign_bool else 'OFF',
-                    'Details': 'Trip Periodic Sync',
-                    'Log': line.strip()
-                })
-            
-            # Sync Trip State (Stop/Moving)
-            if state != current_trip_state:
-                current_trip_state = state
-                events.append({
-                    'LineNum': i + 1,
-                    'Timestamp': final_ts,
+                    'Timestamp': resolve_ts(line, ts),
                     'Type': 'Trip Status',
-                    'Value': state,
-                    'Details': f'State Changed to {state} (Spd:{spd})',
+                    'Value': 'START',
+                    'Details': f'Trip Started (Ign:{ign})',
+                    'Log': line.strip()
+                })
+                
+            # Trip End
+            match_end = rx_trip_end.search(line)
+            if match_end:
+                ts, spd, mov, ign = match_end.groups()
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': resolve_ts(line, ts),
+                    'Type': 'Trip Status',
+                    'Value': 'END',
+                    'Details': f'Trip Ended (Ign:{ign})',
                     'Log': line.strip()
                 })
 
-        # C. Trip Start/End
-        match_start = rx_trip_start.search(line)
-        if match_start:
-            ts, spd, mov, ign = match_start.groups()
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': resolve_ts(line, ts),
-                'Type': 'Trip Status',
-                'Value': 'START',
-                'Details': f'Trip Started (Ign:{ign})',
-                'Log': line.strip()
-            })
-            
-        match_end = rx_trip_end.search(line)
-        if match_end:
-            ts, spd, mov, ign = match_end.groups()
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': resolve_ts(line, ts),
-                'Type': 'Trip Status',
-                'Value': 'END',
-                'Details': f'Trip Ended (Ign:{ign})',
-                'Log': line.strip()
-            })
-            
-        # D. Other Trip Events
-        match_true = rx_trip_true.search(line)
-        if match_true:
-            ts = match_true.group(1)
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': resolve_ts(line, ts),
-                'Type': 'Trip Status',
-                'Value': 'Trip State True',
-                'Details': 'Condition Met',
-                'Log': line.strip()
-            })
+            # Trip True
+            match_true = rx_trip_true.search(line)
+            if match_true:
+                ts = match_true.group(1)
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': resolve_ts(line, ts),
+                    'Type': 'Trip Status',
+                    'Value': 'Trip State True',
+                    'Details': 'Condition Met',
+                    'Log': line.strip()
+                })
 
-        match_dist = rx_trip_dist.search(line)
-        if match_dist:
-            ts, dist = match_dist.groups()
-            # Optional: Filter out 0km if too noisy, but user asked for it
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': resolve_ts(line, ts),
-                'Type': 'Trip Info',
-                'Value': 'Distance',
-                'Details': f'{dist} km',
-                'Log': line.strip()
-            })
+            # Trip Distance
+            match_dist = rx_trip_dist.search(line)
+            if match_dist:
+                ts, dist = match_dist.groups()
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': resolve_ts(line, ts),
+                    'Type': 'Trip Info',
+                    'Value': 'Distance',
+                    'Details': f'{dist} km',
+                    'Log': line.strip()
+                })
 
         # 1b. Movement Detection (Delayed)
-        match_mov = rx_mov_delayed.search(line)
-        if match_mov:
-             ts, old_state, new_state = match_mov.groups()
-             final_ts = resolve_ts(line, ts)
-             new_mov = (new_state == '1')
-             
-             if new_mov != current_movement:
-                current_movement = new_mov
-                events.append({
-                    'LineNum': i + 1,
-                    'Timestamp': final_ts,
-                    'Type': 'Movement',
-                    'Value': 'Start' if new_mov else 'Stop',
-                    'Details': f'Delayed Mov ({old_state}->{new_state})',
-                    'Log': line.strip()
-                })
-
-        # 2. Voltage Check (Fallback if TRIP logs missing)
-        # Only runs if we haven't seen a TRIP line recently (simplified logic: check anyway)
-        match_lipo = rx_lipo.search(line)
-        if match_lipo:
-            # Pass
-            pass
+        if '[MovDetect]' in line:
+            match_mov = rx_mov_delayed.search(line)
+            if match_mov:
+                 ts, old_state, new_state = match_mov.groups()
+                 final_ts = resolve_ts(line, ts)
+                 new_mov = (new_state == '1')
+                 
+                 if new_mov != current_movement:
+                    current_movement = new_mov
+                    events.append({
+                        'LineNum': i + 1,
+                        'Timestamp': final_ts,
+                        'Type': 'Movement',
+                        'Value': 'Start' if new_mov else 'Stop',
+                        'Details': f'Delayed Mov ({old_state}->{new_state})',
+                        'Log': line.strip()
+                    })
 
         # 3a. Explicit GPS Status Change (Priority)
-        match_change = rx_gps_change.search(line)
-        if match_change:
-            ts, old_s, new_s = match_change.groups()
-            final_ts = resolve_ts(line, ts)
-            new_s_int = int(new_s)
-            
-            last_fix_state = new_s_int
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': final_ts,
-                'Type': 'GPS State',
-                'Value': 'Fix Acquired' if new_s_int == 1 else 'Lost Fix',
-                'Details': f'Status Change ({old_s}->{new_s})',
-                'Log': line.strip()
-            })
-
-        # 3b. Check GPS Internal State (Periodic)
-        # We use this to sync state for NoFix reason logic, but we no longer generate events
-        # from this periodic message to avoid noise/duplication with the explicit change event.
-        match_state = rx_gps_state.search(line)
-        if match_state:
-            ts, state = match_state.groups()
-            state = int(state)
-            
-            # Sync state if we missed the start
-            if last_fix_state == -1:
-                last_fix_state = state
-            
-            # Commented out: Periodic update event generation
-            # if state != last_fix_state:
-            #     last_fix_state = state
-            #     events.append({
-            #         'LineNum': i + 1,
-            #         'Timestamp': resolve_ts(line, ts),
-            #         'Type': 'GPS State', 
-            #         'Value': 'Fix Acquired' if state == 1 else 'Lost Fix',
-            #         'Details': 'Internal GNSS (Periodic)'
-            #     })
-
-        # 4. Check No Fix Reason Code
-        # Case A: Inline timestamp (rare but possible)
-        match_code = rx_nofix_code_inline.search(line)
-        if match_code:
-            ts, code_str = match_code.groups()
-            final_ts = resolve_ts(line, ts)
-            code = int(code_str)
-            if code > 0 and last_fix_state == 0:
-                reasons = gps_codes.decode_reason(code)
+        if '[GPS.API]' in line:
+            match_change = rx_gps_change.search(line)
+            if match_change:
+                ts, old_s, new_s = match_change.groups()
+                final_ts = resolve_ts(line, ts)
+                new_s_int = int(new_s)
+                
+                last_fix_state = new_s_int
                 events.append({
                     'LineNum': i + 1,
                     'Timestamp': final_ts,
-                    'Type': 'No Fix Reason',
-                    'Value': f'Code {code}',
-                    'Details': ", ".join(reasons),
+                    'Type': 'GPS State',
+                    'Value': 'Fix Acquired' if new_s_int == 1 else 'Lost Fix',
+                    'Details': f'Status Change ({old_s}->{new_s})',
                     'Log': line.strip()
                 })
-        else:
-            # Case B: Multiline (appears on the next line without timestamp)
-            # We use the LAST seen timestamp
-            match_code_ml = rx_nofix_code_multiline.search(line)
-            if match_code_ml:
-                code_str = match_code_ml.group(1)
-                final_ts = resolve_ts(line, last_timestamp_str)
+                
+            # 5. Static Navigation
+            match_static = rx_static_nav.search(line)
+            if match_static:
+                dt_full, full_msg, state_keyword = match_static.groups()
+                try:
+                    dt_norm = dt_full.replace('.', '/') + ':000'
+                    events.append({
+                        'LineNum': i + 1,
+                        'Timestamp': dt_norm,
+                        'Type': 'Static Navigation',
+                        'Value': state_keyword, # STARTED / ENDED
+                        'Details': full_msg,
+                        'Log': line.strip()
+                    })
+                except: pass
+
+        # 3b. Check GPS Internal State (Periodic)
+        if 'GPS Fix:' in line:
+            match_state = rx_gps_state.search(line)
+            if match_state:
+                ts, state = match_state.groups()
+                state = int(state)
+                # Sync state if we missed the start
+                if last_fix_state == -1:
+                    last_fix_state = state
+
+        # 4. Check No Fix Reason Code
+        if 'No fix reason:' in line:
+            # Case A: Inline timestamp (rare but possible)
+            match_code = rx_nofix_code_inline.search(line)
+            if match_code:
+                ts, code_str = match_code.groups()
+                final_ts = resolve_ts(line, ts)
                 code = int(code_str)
-                if code > 0: # We might check last_fix_state == 0 but sometimes logs are async
+                if code > 0 and last_fix_state == 0:
                     reasons = gps_codes.decode_reason(code)
                     events.append({
                         'LineNum': i + 1,
@@ -639,213 +669,221 @@ def parse_log(content_str):
                         'Details': ", ".join(reasons),
                         'Log': line.strip()
                     })
-
-        # 5. Static Navigation
-        match_static = rx_static_nav.search(line)
-        if match_static:
-            dt_full, full_msg, state_keyword = match_static.groups()
-            # Timestamp example: 2026.01.13 06:12:39
-            # Normalize to match our other timestamps: YYYY/MM/DD HH:MM:SS:000
-            try:
-                dt_norm = dt_full.replace('.', '/') + ':000'
-                events.append({
-                    'LineNum': i + 1,
-                    'Timestamp': dt_norm,
-                    'Type': 'Static Navigation',
-                    'Value': state_keyword, # STARTED / ENDED
-                    'Details': full_msg,
-                    'Log': line.strip()
-                })
-            except: pass
+            else:
+                # Case B: Multiline (appears on the next line without timestamp)
+                # We use the LAST seen timestamp
+                match_code_ml = rx_nofix_code_multiline.search(line)
+                if match_code_ml:
+                    code_str = match_code_ml.group(1)
+                    final_ts = resolve_ts(line, last_timestamp_str)
+                    code = int(code_str)
+                    if code > 0: 
+                        reasons = gps_codes.decode_reason(code)
+                        events.append({
+                            'LineNum': i + 1,
+                            'Timestamp': final_ts,
+                            'Type': 'No Fix Reason',
+                            'Value': f'Code {code}',
+                            'Details': ", ".join(reasons),
+                            'Log': line.strip()
+                        })
 
         # 6. Standard NMEA Parsing
-        match_nmea = rx_nmea.search(line)
-        if match_nmea:
-            ts, nmea = match_nmea.groups()
-            parts = nmea.split(',')
-            stype = parts[0][-3:]
-            lat, lon, kmh = None, None, 0.0
+        if '[NMEA_LOG]' in line:
+            match_nmea = rx_nmea.search(line)
+            if match_nmea:
+                ts, nmea = match_nmea.groups()
+                parts = nmea.split(',')
+                stype = parts[0][-3:]
+                lat, lon, kmh = None, None, 0.0
 
-            if stype == 'RMC' and len(parts) > 7 and parts[2] == 'A':
-                lat = ddm_to_dd(parts[3], parts[4])
-                lon = ddm_to_dd(parts[5], parts[6])
-                try: kmh = float(parts[7].strip() or 0) * 1.852
-                except: pass
-            
-            elif stype == 'GGA' and len(parts) > 6 and parts[6] != '0':
-                lat = ddm_to_dd(parts[2], parts[3])
-                lon = ddm_to_dd(parts[4], parts[5])
+                if stype == 'RMC' and len(parts) > 7 and parts[2] == 'A':
+                    lat = ddm_to_dd(parts[3], parts[4])
+                    lon = ddm_to_dd(parts[5], parts[6])
+                    try: kmh = float(parts[7].strip() or 0) * 1.852
+                    except: pass
+                
+                elif stype == 'GGA' and len(parts) > 6 and parts[6] != '0':
+                    lat = ddm_to_dd(parts[2], parts[3])
+                    lon = ddm_to_dd(parts[4], parts[5])
 
-            if lat and lon:
-                clean_ts = ts.split(':')[0:3] 
-                clean_ts = ":".join(clean_ts)
-                dt_obj = datetime.strptime(f"{current_date_str} {clean_ts}", "%Y/%m/%d %H:%M:%S")
-                iso_ts = dt_obj.isoformat()
+                if lat and lon:
+                    clean_ts = ts.split(':')[0:3] 
+                    clean_ts = ":".join(clean_ts)
+                    dt_obj = datetime.strptime(f"{current_date_str} {clean_ts}", "%Y/%m/%d %H:%M:%S")
+                    iso_ts = dt_obj.isoformat()
 
-                data_points.append({
-                    'LineNum': i + 1,
-                    'loc': (lat, lon),
-                    'desc': f"[{ts}] {nmea}",
-                    'speed': kmh,
-                    'speed_str': f"{kmh:.1f} km/h",
-                    'ignition': current_ignition,
-                    'time_iso': iso_ts 
-                })
+                    data_points.append({
+                        'LineNum': i + 1,
+                        'loc': (lat, lon),
+                        'desc': f"[{ts}] {nmea}",
+                        'speed': kmh,
+                        'speed_str': f"{kmh:.1f} km/h",
+                        'ignition': current_ignition,
+                        'time_iso': iso_ts 
+                    })
 
         # 7. Sleep Events
-        match_sleep_ent = rx_sleep_enter.search(line)
-        if match_sleep_ent:
-            # Check for timestamp at start of line
-            ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
-            ts_val = ts_check.group(1) if ts_check else last_timestamp_str
-            final_ts = resolve_ts(line, ts_val)
-            
-            mode_name, mode_id = match_sleep_ent.groups()
-            details = []
-            if mode_name: details.append(mode_name)
-            if mode_id: details.append(f"Mode[{mode_id}]")
-            
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': final_ts,
-                'Type': 'Sleep Mode',
-                'Value': 'Enter',
-                'Details': f"Entered Sleep ({' '.join(details)})",
-                'Log': line.strip()
-            })
+        if '[SLEEP]' in line:
+            match_sleep_ent = rx_sleep_enter.search(line)
+            if match_sleep_ent:
+                # Check for timestamp at start of line
+                ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
+                ts_val = ts_check.group(1) if ts_check else last_timestamp_str
+                final_ts = resolve_ts(line, ts_val)
+                
+                mode_name, mode_id = match_sleep_ent.groups()
+                details = []
+                if mode_name: details.append(mode_name)
+                if mode_id: details.append(f"Mode[{mode_id}]")
+                
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': final_ts,
+                    'Type': 'Sleep Mode',
+                    'Value': 'Enter',
+                    'Details': f"Entered Sleep ({' '.join(details)})",
+                    'Log': line.strip()
+                })
 
-        match_sleep_exit = rx_sleep_exit.search(line)
-        if match_sleep_exit:
-            ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
-            ts_val = ts_check.group(1) if ts_check else last_timestamp_str
-            final_ts = resolve_ts(line, ts_val)
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': final_ts,
-                'Type': 'Sleep Mode',
-                'Value': 'Exit',
-                'Details': 'Totally Woken',
-                'Log': line.strip()
-            })
+            match_sleep_exit = rx_sleep_exit.search(line)
+            if match_sleep_exit:
+                ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
+                ts_val = ts_check.group(1) if ts_check else last_timestamp_str
+                final_ts = resolve_ts(line, ts_val)
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': final_ts,
+                    'Type': 'Sleep Mode',
+                    'Value': 'Exit',
+                    'Details': 'Totally Woken',
+                    'Log': line.strip()
+                })
 
-        match_sleep_wake = rx_sleep_wakeup.search(line)
-        if match_sleep_wake:
-            ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
-            ts_val = ts_check.group(1) if ts_check else last_timestamp_str
-            final_ts = resolve_ts(line, ts_val)
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': final_ts,
-                'Type': 'Sleep Mode',
-                'Value': 'WakeUp Send',
-                'Details': 'WakeUp to Send Data',
-                'Log': line.strip()
-            })
-            
-        match_sleep_warn = rx_sleep_warning.search(line)
-        if match_sleep_warn:
-            ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
-            ts_val = ts_check.group(1) if ts_check else last_timestamp_str
-            final_ts = resolve_ts(line, ts_val)
-            
-            err_type, reason = match_sleep_warn.groups()
-            events.append({
-                'LineNum': i + 1,
-                'Timestamp': final_ts,
-                'Type': 'Sleep Mode',
-                'Value': 'Warning',
-                'Details': f"{err_type} Blocked: {reason.strip()}",
-                'Log': line.strip()
-            })
+            match_sleep_wake = rx_sleep_wakeup.search(line)
+            if match_sleep_wake:
+                ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
+                ts_val = ts_check.group(1) if ts_check else last_timestamp_str
+                final_ts = resolve_ts(line, ts_val)
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': final_ts,
+                    'Type': 'Sleep Mode',
+                    'Value': 'WakeUp Send',
+                    'Details': 'WakeUp to Send Data',
+                    'Log': line.strip()
+                })
+                
+            match_sleep_warn = rx_sleep_warning.search(line)
+            if match_sleep_warn:
+                ts_check = re.search(r'(\d{2}:\d{2}:\d{2}:\d{3})', line)
+                ts_val = ts_check.group(1) if ts_check else last_timestamp_str
+                final_ts = resolve_ts(line, ts_val)
+                
+                err_type, reason = match_sleep_warn.groups()
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': final_ts,
+                    'Type': 'Sleep Mode',
+                    'Value': 'Warning',
+                    'Details': f"{err_type} Blocked: {reason.strip()}",
+                    'Log': line.strip()
+                })
 
         # 8. AT Commands & Responses (console-trace format: [ATCMD] / [AT.RSP])
-        match_at_cmd = rx_at_cmd.search(line)
-        if match_at_cmd:
-            ts_ac, cmd = match_at_cmd.groups()
-            cmd_clean = cmd.strip().strip('"')
-            _at_group_counter += 1
-            _last_at_cmd_sent = cmd_clean
-            _last_at_cmd_base = _extract_at_base_cmd(cmd_clean)
-            _cat, _desc = classify_at_command(cmd_clean)
-            modem_info['at_commands'].append({
-                'Timestamp': resolve_ts(line, ts_ac), 'Direction': 'CMD',
-                'Content': cmd_clean, 'LineNum': i + 1,
-                'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
-            })
-
-        match_at_rsp = rx_at_rsp.search(line)
-        if match_at_rsp:
-            ts_ar, rsp = match_at_rsp.groups()
-            rsp = rsp.strip().strip('"')
-            # In Catcher logs [AT.RSP] carries parsed fields ("Parsed Status: 5"),
-            # in console-trace logs it carries raw responses ("+CSQ: 15,0").
-            _rsp_dir = 'RSP'
-            if not (rsp.startswith('+') or rsp.upper() in ('OK', 'ERROR', '>', 'CONNECT')):
-                _rsp_dir = 'INFO'
-            _cat, _desc = classify_at_command(rsp)
-            modem_info['at_commands'].append({
-                'Timestamp': resolve_ts(line, ts_ar), 'Direction': _rsp_dir,
-                'Content': rsp, 'LineNum': i + 1,
-                'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
-            })
-            # Extract signal from +CSQ
-            m_csq = rx_csq_val.search(rsp)
-            if m_csq:
-                csq = int(m_csq.group(1))
-                if csq < 99:
-                    modem_info['signal_readings'].append({
-                        'Timestamp': resolve_ts(line, ts_ar), 'CSQ': csq,
-                        'RSSI_dBm': -113 + (csq * 2), 'RSRP_dBm': None,
-                        'SINR_dB': None, 'RSRQ_dB': None, 'Network': current_network_type
-                    })
-            # Extract signal from +QCSQ
-            m_qcsq = rx_qcsq_val.search(rsp)
-            if m_qcsq:
-                nw = m_qcsq.group(1)
-                rssi_r = int(m_qcsq.group(2)) if m_qcsq.group(2) else None
-                rsrp_r = int(m_qcsq.group(3)) if m_qcsq.group(3) else None
-                sinr_r = int(m_qcsq.group(4)) if m_qcsq.group(4) else None
-                rsrq_r = float(m_qcsq.group(5)) if m_qcsq.group(5) else None
-                modem_info['signal_readings'].append({
-                    'Timestamp': resolve_ts(line, ts_ar), 'CSQ': None,
-                    'RSSI_dBm': rssi_r, 'RSRP_dBm': rsrp_r,
-                    'SINR_dB': sinr_r, 'RSRQ_dB': rsrq_r, 'Network': nw
+        if '[ATCMD]' in line:
+            match_at_cmd = rx_at_cmd.search(line)
+            if match_at_cmd:
+                ts_ac, cmd = match_at_cmd.groups()
+                cmd_clean = cmd.strip().strip('"')
+                _at_group_counter += 1
+                _last_at_cmd_sent = cmd_clean
+                _last_at_cmd_base = _extract_at_base_cmd(cmd_clean)
+                _cat, _desc = classify_at_command(cmd_clean)
+                modem_info['at_commands'].append({
+                    'Timestamp': resolve_ts(line, ts_ac), 'Direction': 'CMD',
+                    'Content': cmd_clean, 'LineNum': i + 1,
+                    'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
                 })
-            # Extract operator from +COPS
-            m_cops = rx_cops_val.search(rsp)
-            if m_cops:
-                oper = m_cops.group(1)
-                act = int(m_cops.group(2)) if m_cops.group(2) else None
-                nw_name = NETWORK_ACT.get(act, str(act)) if act is not None else current_network_type
-                if oper != current_operator:
-                    current_operator = oper
-                    current_network_type = nw_name
-                    events.append({
-                        'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
-                        'Type': 'Operator', 'Value': oper,
-                        'Details': f'Operator: {oper} ({nw_name})', 'Log': line.strip()
-                    })
-            # Extract registration from +CREG/+CEREG
-            m_creg = rx_creg_val.search(rsp)
-            if m_creg:
-                stat = int(m_creg.group(1))
-                lac = m_creg.group(2)
-                ci = m_creg.group(3)
-                act = int(m_creg.group(4)) if m_creg.group(4) else None
-                if stat != current_creg_state:
-                    current_creg_state = stat
-                    sname = CREG_STATES.get(stat, f'Unknown({stat})')
-                    nw_name = NETWORK_ACT.get(act, '') if act is not None else ''
-                    if nw_name: current_network_type = nw_name
-                    det = sname
-                    if lac: det += f' LAC:{lac}'
-                    if ci: det += f' CID:{ci}'
-                    if nw_name: det += f' [{nw_name}]'
-                    events.append({
-                        'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
-                        'Type': 'Network', 'Value': sname,
-                        'Details': det, 'Log': line.strip()
-                    })
+
+        if '[AT.RSP]' in line:
+            match_at_rsp = rx_at_rsp.search(line)
+            if match_at_rsp:
+                ts_ar, rsp = match_at_rsp.groups()
+                rsp = rsp.strip().strip('"')
+                # In Catcher logs [AT.RSP] carries parsed fields ("Parsed Status: 5"),
+                # in console-trace logs it carries raw responses ("+CSQ: 15,0").
+                _rsp_dir = 'RSP'
+                if not (rsp.startswith('+') or rsp.upper() in ('OK', 'ERROR', '>', 'CONNECT')):
+                    _rsp_dir = 'INFO'
+                _cat, _desc = classify_at_command(rsp)
+                modem_info['at_commands'].append({
+                    'Timestamp': resolve_ts(line, ts_ar), 'Direction': _rsp_dir,
+                    'Content': rsp, 'LineNum': i + 1,
+                    'Category': _cat, 'Description': _desc, 'Group': _at_group_counter,
+                })
+                # Extract signal from +CSQ
+                if '+CSQ:' in rsp:
+                    m_csq = rx_csq_val.search(rsp)
+                    if m_csq:
+                        csq = int(m_csq.group(1))
+                        if csq < 99:
+                            modem_info['signal_readings'].append({
+                                'Timestamp': resolve_ts(line, ts_ar), 'CSQ': csq,
+                                'RSSI_dBm': -113 + (csq * 2), 'RSRP_dBm': None,
+                                'SINR_dB': None, 'RSRQ_dB': None, 'Network': current_network_type
+                            })
+                # Extract signal from +QCSQ
+                if '+QCSQ:' in rsp:
+                    m_qcsq = rx_qcsq_val.search(rsp)
+                    if m_qcsq:
+                        nw = m_qcsq.group(1)
+                        rssi_r = int(m_qcsq.group(2)) if m_qcsq.group(2) else None
+                        rsrp_r = int(m_qcsq.group(3)) if m_qcsq.group(3) else None
+                        sinr_r = int(m_qcsq.group(4)) if m_qcsq.group(4) else None
+                        rsrq_r = float(m_qcsq.group(5)) if m_qcsq.group(5) else None
+                        modem_info['signal_readings'].append({
+                            'Timestamp': resolve_ts(line, ts_ar), 'CSQ': None,
+                            'RSSI_dBm': rssi_r, 'RSRP_dBm': rsrp_r,
+                            'SINR_dB': sinr_r, 'RSRQ_dB': rsrq_r, 'Network': nw
+                        })
+                # Extract operator from +COPS
+                if '+COPS:' in rsp:
+                    m_cops = rx_cops_val.search(rsp)
+                    if m_cops:
+                        oper = m_cops.group(1)
+                        act = int(m_cops.group(2)) if m_cops.group(2) else None
+                        nw_name = NETWORK_ACT.get(act, str(act)) if act is not None else current_network_type
+                        if oper != current_operator:
+                            current_operator = oper
+                            current_network_type = nw_name
+                            events.append({
+                                'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
+                                'Type': 'Operator', 'Value': oper,
+                                'Details': f'Operator: {oper} ({nw_name})', 'Log': line.strip()
+                            })
+                # Extract registration from +CREG/+CEREG
+                if 'REG:' in rsp: # +CREG, +CEREG, +CGREG
+                    m_creg = rx_creg_val.search(rsp)
+                    if m_creg:
+                        stat = int(m_creg.group(1))
+                        lac = m_creg.group(2)
+                        ci = m_creg.group(3)
+                        act = int(m_creg.group(4)) if m_creg.group(4) else None
+                        if stat != current_creg_state:
+                            current_creg_state = stat
+                            sname = CREG_STATES.get(stat, f'Unknown({stat})')
+                            nw_name = NETWORK_ACT.get(act, '') if act is not None else ''
+                            if nw_name: current_network_type = nw_name
+                            det = sname
+                            if lac: det += f' LAC:{lac}'
+                            if ci: det += f' CID:{ci}'
+                            if nw_name: det += f' [{nw_name}]'
+                            events.append({
+                                'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_ar),
+                                'Type': 'Network', 'Value': sname,
+                                'Details': det, 'Log': line.strip()
+                            })
 
         # 8b. Catcher AT dump format (|[AT.CMD] ... AT:| ASCII:...)
         #     These lines have no timestamp — use last_timestamp_str set by the
@@ -969,18 +1007,226 @@ def parse_log(content_str):
                     })
 
         # 9. Record Sending State Changes
-        match_rec = rx_rec_send.search(line)
-        if match_rec:
-            ts_rs, server, old_s, new_s = match_rec.groups()
-            old_si, new_si = int(old_s), int(new_s)
-            old_name = REC_SEND_STATES.get(old_si, str(old_si))
-            new_name = REC_SEND_STATES.get(new_si, str(new_si))
+        # 9a. Text-based CHANGE.STATE transitions (preferred, more readable)
+        _rs_matched = False
+        _m_cs = rx_rec_send_change.search(line)
+        if _m_cs:
+            _rs_matched = True
+            ts_rs, rs_task, _cs_line, rs_server, old_name, new_name = _m_cs.groups()
+            old_name = old_name.strip()
+            new_name = new_name.strip()
             events.append({
                 'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_rs),
                 'Type': 'Record Sending', 'Value': new_name,
-                'Details': f'Server {server}: {old_name} \u2192 {new_name}',
+                'Details': f'RS{rs_task} Srv{rs_server}: {old_name} \u2192 {new_name}',
                 'Log': line.strip()
             })
+
+        # 9b. Numeric state transitions (fallback for older formats)
+        if not _rs_matched:
+            match_rec = rx_rec_send.search(line)
+            if match_rec:
+                _rs_matched = True
+                ts_rs, server, old_s, new_s = match_rec.groups()
+                old_si, new_si = int(old_s), int(new_s)
+                old_name = REC_SEND_STATES.get(old_si, str(old_si))
+                new_name = REC_SEND_STATES.get(new_si, str(new_si))
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, ts_rs),
+                    'Type': 'Record Sending', 'Value': new_name,
+                    'Details': f'RS{server} Srv{server}: {old_name} \u2192 {new_name}',
+                    'Log': line.strip()
+                })
+
+        # 9c. Key record sending milestones
+        if not _rs_matched and '[REC.SEND' in line:
+            _m_ai = rx_rec_send_accepted_imei.search(line)
+            if _m_ai:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_ai.group(1)),
+                    'Type': 'Record Sending', 'Value': 'IMEI Accepted',
+                    'Details': f'RS{_m_ai.group(2)}: Server accepted IMEI',
+                    'Log': line.strip()
+                })
+            _m_ar = rx_rec_send_accepted_recs.search(line)
+            if _m_ar:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_ar.group(1)),
+                    'Type': 'Record Sending', 'Value': 'Records Accepted',
+                    'Details': f'RS{_m_ar.group(2)}: Server accepted records',
+                    'Log': line.strip()
+                })
+            _m_pk = rx_rec_send_packed.search(line)
+            if _m_pk:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_pk.group(1)),
+                    'Type': 'Record Sending', 'Value': f'Packed {_m_pk.group(3)}',
+                    'Details': f'RS{_m_pk.group(2)}: {_m_pk.group(3)} records packed, waiting for ACK',
+                    'Log': line.strip()
+                })
+            _m_st = rx_rec_send_sent.search(line)
+            if _m_st:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_st.group(1)),
+                    'Type': 'Record Sending', 'Value': f'Sent {_m_st.group(3)}/{_m_st.group(4)}',
+                    'Details': f'RS{_m_st.group(2)}: Sent {_m_st.group(3)} records (min required {_m_st.group(4)})',
+                    'Log': line.strip()
+                })
+            _m_sp = rx_rec_send_starting.search(line)
+            if _m_sp:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_sp.group(1)),
+                    'Type': 'Record Sending', 'Value': 'Starting Send',
+                    'Details': f'RS{_m_sp.group(2)}: Starting periodic data sending',
+                    'Log': line.strip()
+                })
+            _m_en = rx_rec_send_enough.search(line)
+            if _m_en:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_en.group(1)),
+                    'Type': 'Record Sending', 'Value': 'Enough Records',
+                    'Details': f'RS{_m_en.group(2)}: Have enough records to send',
+                    'Log': line.strip()
+                })
+            _m_lt = rx_rec_send_link_tmo.search(line)
+            if _m_lt:
+                _rs_matched = True
+                events.append({
+                    'LineNum': i + 1, 'Timestamp': resolve_ts(line, _m_lt.group(1)),
+                    'Type': 'Record Sending', 'Value': 'Link Timeout',
+                    'Details': f'RS{_m_lt.group(2)}: Link timeout on server {_m_lt.group(3)} \u2192 closing',
+                    'Log': line.strip()
+                })
+
+        # 9b. Record Generation — multiline accumulator
+        # The firmware prints a multiline block starting with [REC.GEN] Record Content:
+        # followed by GPS fields, IO IDs, Record Size, then a summary line.
+        # We accumulate all lines until the block ends (Record Size or save-queued line).
+
+        # Check for "Record Content:" to start accumulation
+        if rx_rec_content_start.search(line):
+            # Flush any previous incomplete record
+            if _rec_accumulating and _rec_current:
+                modem_info['records'].append(_rec_current)
+            _rec_accumulating = True
+            _rec_start_line = i + 1
+            _rec_current = {
+                'LineNum': i + 1,
+                'Timestamp': resolve_ts(line, last_timestamp_str),
+                'RecTimestamp': None,
+                'Priority': None,
+                'Latitude': None, 'Longitude': None,
+                'Altitude': None, 'Angle': None,
+                'Speed': None, 'HDOP': None,
+                'SatInUse': None, 'GPSFix': None,
+                'GSpeed': None, 'GSpeedSrc': None,
+                'EventAVLID': None,
+                'IOs': {},          # {avl_id_int: value_str}
+                'RecordSize': None,
+                'RecType': None,    # Eventual / Periodic
+                'RecPriority': None, # none/low/high/panic
+            }
+
+        # While accumulating, parse fields from continuation lines
+        if _rec_accumulating and _rec_current:
+            # Timestamp (record epoch)
+            _m = rx_rec_timestamp.search(line)
+            if _m: _rec_current['RecTimestamp'] = int(_m.group(1))
+            
+            # Priority
+            _m = rx_rec_priority.search(line)
+            if _m: _rec_current['Priority'] = int(_m.group(1))
+            
+            # GPS fields
+            _m = rx_rec_latitude.search(line)
+            if _m: _rec_current['Latitude'] = float(_m.group(1))
+            _m = rx_rec_longitude.search(line)
+            if _m: _rec_current['Longitude'] = float(_m.group(1))
+            _m = rx_rec_altitude.search(line)
+            if _m: _rec_current['Altitude'] = int(_m.group(1))
+            _m = rx_rec_angle.search(line)
+            if _m: _rec_current['Angle'] = int(_m.group(1))
+            _m = rx_rec_speed.search(line)
+            if _m: _rec_current['Speed'] = int(_m.group(1))
+            _m = rx_rec_hdop.search(line)
+            if _m: _rec_current['HDOP'] = float(_m.group(1))
+            _m = rx_rec_sat.search(line)
+            if _m: _rec_current['SatInUse'] = int(_m.group(1))
+            _m = rx_rec_fix.search(line)
+            if _m: _rec_current['GPSFix'] = int(_m.group(1))
+            _m = rx_rec_gspeed.search(line)
+            if _m:
+                _rec_current['GSpeed'] = int(_m.group(1))
+                _rec_current['GSpeedSrc'] = _m.group(2)
+            
+            # Event AVL ID
+            _m = rx_avl_id.search(line)
+            if _m: _rec_current['EventAVLID'] = int(_m.group(1))
+            
+            # IO elements
+            _m = rx_rec_io.search(line)
+            if _m:
+                _io_id = int(_m.group(1))
+                _io_val = _m.group(2).strip().strip('"')
+                _rec_current['IOs'][_io_id] = _io_val
+            
+            # Record Size — marks the end of the content block
+            _m = rx_rec_size.search(line)
+            if _m:
+                _rec_current['RecordSize'] = int(_m.group(1))
+
+        # Record save-queued line: "Eventual/Periodic <prio> priority record save queued"
+        _m_save = rx_rec_save.search(line)
+        if _m_save:
+            _ts_save = _m_save.group(1)
+            _rec_type = _m_save.group(2)   # Eventual / Periodic
+            _rec_prio = _m_save.group(3)   # none / low / high / panic
+            
+            if _rec_accumulating and _rec_current:
+                _rec_current['RecType'] = _rec_type
+                _rec_current['RecPriority'] = _rec_prio
+                _rec_current['Timestamp'] = resolve_ts(line, _ts_save)
+                modem_info['records'].append(_rec_current)
+                
+                # Also emit a summary event
+                _io_count = len(_rec_current['IOs'])
+                _avl = _rec_current.get('EventAVLID', '?')
+                _sz = _rec_current.get('RecordSize', '?')
+                _spd = _rec_current.get('Speed', 0)
+                _fix = 'Fix' if _rec_current.get('GPSFix') == 1 else 'NoFix'
+                _io_ids = ', '.join(str(k) for k in sorted(_rec_current['IOs'].keys())) if _rec_current['IOs'] else 'none'
+                events.append({
+                    'LineNum': _rec_start_line,
+                    'Timestamp': resolve_ts(line, _ts_save),
+                    'Type': 'Record Generation',
+                    'Value': f'{_rec_type} ({_rec_prio})',
+                    'Details': f'AVL:{_avl} | {_fix} | Spd:{_spd} | IOs:[{_io_ids}] | {_sz}B',
+                    'Log': line.strip()
+                })
+                _rec_accumulating = False
+                _rec_current = None
+            else:
+                # Save-queued line without a preceding content block (unusual but handle it)
+                events.append({
+                    'LineNum': i + 1,
+                    'Timestamp': resolve_ts(line, _ts_save),
+                    'Type': 'Record Generation',
+                    'Value': f'{_rec_type} ({_rec_prio})',
+                    'Details': f'{_rec_type} {_rec_prio} record save queued',
+                    'Log': line.strip()
+                })
+        elif not _m_save and _rec_accumulating and _rec_current:
+            # Check if we've gone too far without closing (safety: 80 lines max)
+            if (i + 1 - _rec_start_line) > 80:
+                modem_info['records'].append(_rec_current)
+                _rec_accumulating = False
+                _rec_current = None
 
         # 10. Modem State Changes
         match_modem = rx_modem_change.search(line)
@@ -1111,6 +1357,10 @@ def parse_log(content_str):
             'Network': _status_snapshot.get('network', current_network_type),
         })
 
+    # Flush remaining incomplete record accumulator
+    if _rec_accumulating and _rec_current:
+        modem_info['records'].append(_rec_current)
+
     # Sort events by timestamp
     events.sort(key=lambda x: x.get('Timestamp', ''))
 
@@ -1208,56 +1458,59 @@ def create_timeline(events):
         'Network': '#20B2AA',    # LightSeaGreen
         'Operator': '#DAA520',   # Goldenrod
         'Record Sending': '#DC143C', # Crimson
+        'Record Generation': '#FF69B4', # HotPink
         'Modem': '#708090',      # SlateGray
         'GPRS': '#FF6347',       # Tomato
     }
 
     # Clean and convert Timestamp
-    # The timestamps from the logger are like "2026/01/26 13:16:11:148"
-    # We need to replace the last colon with a dot for milliseconds parsing, or use a custom format
     try:
-        # Replace the last colon with a dot if it looks like milliseconds
-        # Or just tell pandas the format: %Y/%m/%d %H:%M:%S:%f
         df_events['Timestamp'] = pd.to_datetime(df_events['Timestamp'], format='%Y/%m/%d %H:%M:%S:%f', errors='coerce')
-        
-        # Fallback for other formats (like Static Nav might have slightly different one)
-        if df_events['Timestamp'].isnull().any():
-             # Try a more generic parse for failed rows (e.g. Static Nav might lack ms or use dots)
-             # The failed entries are currently NaT, so we can't get the original string easily from the column
-             # But usually the main format covers 99% of cases. 
-             # If needed, we can rely on Plotly's string parsing if we don't convert to datetime,
-             # but we need datetime for the range slider to work well.
-             pass
-
-        # Drop rows where timestamp parsing failed completely
         df_events = df_events.dropna(subset=['Timestamp'])
-        
     except Exception as e:
-        # Fallback: simple conversion (might lose milliseconds or fallback to string)
         pass
 
-    fig = px.scatter(
-        df_events, 
-        x="Timestamp", 
-        y="Type", 
-        color="Type", 
-        symbol="Type", # Use Type for symbol to avoid 'Value' cardinality issues
-        hover_data={"Value": True, "Details": True, "Log": False, "Type": False, "Timestamp": True, "LineNum": True}, 
-        custom_data=["Log", "Details", "Value", "LineNum"], # Make Log available for click events
-        title="Event Timeline",
-        color_discrete_map=color_map,
-        height=500, # Slightly taller
-        opacity=0.9
-    )
+    if df_events.empty:
+        return None
 
-    fig.update_traces(marker=dict(size=10, line=dict(width=1, color='DarkSlateGrey')))
+    # Use graph_objects for better performance with large datasets (WebGL)
+    fig = go.Figure()
     
+    # Group by Type to assign colors and maintain legend
+    for event_type, group in df_events.groupby("Type"):
+        color = color_map.get(event_type, '#888888')
+        
+        # Create hover text
+        hover_text = (
+            "<b>" + group["Type"] + "</b><br>" +
+            "Value: " + group["Value"].astype(str) + "<br>" +
+            "Details: " + group["Details"].astype(str) + "<br>" +
+            "Time: " + group["Timestamp"].dt.strftime('%H:%M:%S.%f').str[:-3] + "<br>" +
+            "Line: " + group["LineNum"].astype(str)
+        )
+
+        fig.add_trace(go.Scattergl(
+            x=group["Timestamp"],
+            y=group["Type"],
+            mode='markers',
+            marker=dict(
+                color=color,
+                size=10,
+                line=dict(width=1, color='DarkSlateGrey')
+            ),
+            name=event_type,
+            text=hover_text,
+            hoverinfo="text",
+            customdata=group[["Log", "Details", "Value", "LineNum"]],
+        ))
+
     fig.update_layout(
-        xaxis_title=None, 
-        yaxis_title=None, 
+        title="Event Timeline",
+        xaxis_title=None,
+        yaxis_title=None,
         legend_title=None,
         xaxis=dict(
-            rangeslider=dict(visible=True, thickness=0.1), # Add Range Slider
+            rangeslider=dict(visible=True, thickness=0.1),
             type="date"
         ),
         margin=dict(l=20, r=20, t=40, b=20),
@@ -1268,7 +1521,8 @@ def create_timeline(events):
             xanchor="right",
             x=1
         ),
-        hovermode="x unified" # Easier comparison
+        hovermode="closest", # x unified can be heavy with many points
+        height=500
     )
     
     return fig
@@ -1358,6 +1612,14 @@ def create_state_timeline(events):
         'Check GPRS': '#FFA500', 'IMEI Handshake': '#FF6347',
         'Done': '#90EE90', 'Error/Finish': '#B22222', 'Check Recs': '#FFB6C1',
         'Continue': '#E9967A', 'Flush': '#F08080', 'Close GPRS': '#CD853F',
+        # Record Sending (text-based state names from CHANGE.STATE)
+        'check rec no': '#FFB6C1', 'check gprs': '#FFA500', 'check link': '#FF8C00',
+        'send imei': '#FF6347', 'send records': '#DC143C', 'send records cont': '#E9967A',
+        'waiting': '#DAA520', 'finish': '#B22222', 'finished': '#90EE90',
+        # Record Sending milestones
+        'IMEI Accepted': '#20B2AA', 'Records Accepted': '#228B22',
+        'Starting Send': '#7B68EE', 'Enough Records': '#9370DB',
+        'Link Timeout': '#B22222',
         # Modem
         'READY': '#228B22', 'INIT': '#DAA520', 'UNAV': '#B22222', 'PROT': '#808080',
     }
@@ -1376,29 +1638,30 @@ def create_state_timeline(events):
         return None
 
     log_end = df_events['Timestamp'].max()
-    gantt_rows = []
+    gantt_dfs = []
 
     for stype in SWIMLANE_TYPES:
-        type_df = df_events[df_events['Type'] == stype].sort_values('Timestamp')
+        type_df = df_events[df_events['Type'] == stype].sort_values('Timestamp').copy()
         if type_df.empty:
             continue
+        
+        # Vectorized end-time calculation
+        type_df['Start'] = type_df['Timestamp']
+        type_df['End'] = type_df['Start'].shift(-1).fillna(log_end)
+        
+        # Fix zero duration events
+        mask = type_df['End'] == type_df['Start']
+        type_df.loc[mask, 'End'] = type_df.loc[mask, 'End'] + pd.Timedelta(seconds=1)
+        
+        type_df['Category'] = stype
+        type_df['State'] = type_df['Value'].astype(str)
+        
+        gantt_dfs.append(type_df[['Category', 'Start', 'End', 'State', 'Details']])
 
-        for idx in range(len(type_df)):
-            row = type_df.iloc[idx]
-            start = row['Timestamp']
-            end = type_df.iloc[idx + 1]['Timestamp'] if idx + 1 < len(type_df) else log_end
-            if start == end:
-                end = start + pd.Timedelta(seconds=2)
-            gantt_rows.append({
-                'Category': stype, 'Start': start, 'End': end,
-                'State': str(row['Value']),
-                'Details': row.get('Details', ''),
-            })
-
-    if not gantt_rows:
+    if not gantt_dfs:
         return None
 
-    df_gantt = pd.DataFrame(gantt_rows)
+    df_gantt = pd.concat(gantt_dfs)
 
     fig = px.timeline(
         df_gantt, x_start='Start', x_end='End', y='Category', color='State',

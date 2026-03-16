@@ -1,15 +1,25 @@
-streamlit
-streamlit-autorefresh
-folium
-streamlit-folium
-pyyaml
-requests
-tqdm
+# ── Backend ──────────────────────────────────────
+fastapi
+uvicorn[standard]
+websockets
+python-multipart
+
+# ── Data & plotting ─────────────────────────────
 pandas
-plotly
-pystray
-Pillow
-openpyxl
-psutil
 numpy
+plotly
+folium
+openpyxl
+
+# ── Networking & utilities ──────────────────────
+requests
+jira
+pyyaml
+psutil
 protobuf
+tqdm
+Pillow
+pyserial
+
+# ── System tray launcher ───────────────────────
+pystray

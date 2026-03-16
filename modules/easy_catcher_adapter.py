@@ -94,17 +94,25 @@ def process_dumps(process_root, tool_paths, log_cb=None):
     module.CATCHER_LOG_TO_HEX_AND_ASCII_PATH = hex_ascii_exe
     module.TEMP_FILENAME = os.path.join(process_root, 'tempfile.tmp')
 
+    # Load Releasebook credentials from easy-catcher/config.yml if available
+    ec_login = {'username': '', 'password': ''}
+    ec_fw_type = 'public'
+    try:
+        ec_cfg = module.load_config(module.CONFIG_FILENAME)
+        if ec_cfg:
+            ec_login = ec_cfg.get('login', ec_login)
+            ec_fw_type = ec_cfg.get('general', {}).get('fw_type', ec_fw_type)
+    except Exception:
+        pass
+
     # Construct a config dict compatible with the submodule's expectations
     config = {
         'general': {
             'db_path': tool_paths.get('DB_PATH', ''),
             'sort_logs': True,
-            'fw_type': 'public',
+            'fw_type': ec_fw_type,
         },
-        'login': {
-            'username': '',
-            'password': '',
-        },
+        'login': ec_login,
     }
 
     # Now that the submodule uses absolute paths for its own resources,

@@ -10,6 +10,8 @@ import time
 import struct
 import datetime
 import select
+import json
+import os
 from collections import defaultdict
 
 
@@ -40,7 +42,10 @@ def load_avl_ids_from_excel(path: str) -> tuple[dict[int, str], str | None]:
     try:
         import openpyxl
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb['MainTable']
+        if 'MainTable' in wb.sheetnames:
+            ws = wb['MainTable']
+        else:
+            ws = wb.active
         names: dict[int, str] = {}
         for row in ws.iter_rows(min_row=2, values_only=True):
             avl_id = row[0]
@@ -589,7 +594,7 @@ class TeltonikaProtocol:
         resp = bytearray(7)
         resp[0] = 0x00
         resp[1] = 0x05
-        struct.pack_into('<H', resp, 2, pkt_id)   # little-endian echo (DTT style)
+        struct.pack_into('!H', resp, 2, pkt_id)   # big-endian echo
         resp[4] = not_usable & 0xFF
         resp[5] = avl_pkt_id & 0xFF
         resp[6] = record_count & 0xFF
@@ -619,6 +624,9 @@ class _QueuedCommand:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Server
 # ═══════════════════════════════════════════════════════════════════════════════
+
+STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                          'output', 'server_state.json')
 
 class TeltonikaServer:
     """Teltonika GPS Server – TCP **or** UDP on a single port."""
@@ -658,14 +666,67 @@ class TeltonikaServer:
         self.lock = threading.Lock()
         self.data_event = threading.Event()
         self._data_version = 0
+        self._saved_version = 0
+
+        # Load persisted state
+        self.load_state()
 
     @property
     def data_version(self) -> int:
         return self._data_version
 
+    # ── Persistence ────────────────────────────────────────────────────────────
+    def load_state(self):
+        """Load logs/records from disk."""
+        if not os.path.exists(STATE_FILE):
+            return
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            with self.lock:
+                self.parsed_records = state.get('parsed_records', [])
+                self.raw_messages = state.get('raw_messages', [])
+                self.log_messages = state.get('log_messages', [])
+                self.command_history = state.get('command_history', [])
+                # Restore scheduled commands if simple strings
+                sched = state.get('scheduled_commands', {})
+                self.scheduled_commands = defaultdict(list, sched)
+            self.log(f"Loaded state from {STATE_FILE}", "INFO")
+        except Exception as e:
+            self.log(f"Failed to load state: {e}", "ERROR")
+
+    def save_state(self):
+        """Save logs/records to disk."""
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        try:
+            with self.lock:
+                state = {
+                    'parsed_records': list(self.parsed_records),
+                    'raw_messages': list(self.raw_messages),
+                    'log_messages': list(self.log_messages),
+                    'command_history': list(self.command_history),
+                    'scheduled_commands': dict(self.scheduled_commands),
+                }
+                # Update saved version to avoid redundant saves
+                self._saved_version = self._data_version
+            
+            with open(STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(state, f, default=str)
+                
+        except Exception as e:
+            print(f"Save state error: {e}")
+
+    def _saver_loop(self):
+        """Background thread to save state periodically."""
+        while self.running:
+            time.sleep(2)
+            if self._data_version != self._saved_version:
+                self.save_state()
+
     # ── Logging ────────────────────────────────────────────────────────────────
     def log(self, message: str, msg_type: str = "INFO"):
         ts = datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        print(f"[{ts}] [{msg_type}] {message}")
         entry = {'timestamp': ts, 'type': msg_type, 'message': message}
         with self.lock:
             self.log_messages.insert(0, entry)
@@ -707,8 +768,16 @@ class TeltonikaServer:
         # Pre-flight port check
         err = self.check_port(self.port, self.protocol_mode)
         if err:
-            self.log(f"Cannot start: {err}", "ERROR")
-            return f"Port {self.port} unavailable: {err}"
+            # Maybe zombie?
+            self.log(f"Port {self.port} busy. Attempting to kill zombie...", "WARN")
+            if self.kill_zombie(self.port, self.protocol_mode):
+                time.sleep(0.5) # Wait for it to die
+                err = self.check_port(self.port, self.protocol_mode)
+            
+            if err:
+                self.log(f"Cannot start: {err}", "ERROR")
+                return f"Port {self.port} unavailable: {err}"
+
         self.running = True
         self._start_error = None
         if self.protocol_mode == 'TCP':
@@ -716,11 +785,28 @@ class TeltonikaServer:
         else:
             threading.Thread(target=self._udp_server_loop, daemon=True).start()
         threading.Thread(target=self._command_sender_loop, daemon=True).start()
+        threading.Thread(target=self._saver_loop, daemon=True).start()
         self.log(f"Server started – {self.protocol_mode} on port {self.port}", "START")
         return None
 
+    def kill_zombie(self, port: int, protocol: str) -> bool:
+        """Send a magic kill packet to localhost:port to terminate old instance."""
+        try:
+            if protocol.upper() == 'TCP':
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1)
+                    s.connect(('127.0.0.1', port))
+                    s.sendall(b'SERVER_DIE_NOW_PLEASE')
+            else:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.sendto(b'SERVER_DIE_NOW_PLEASE', ('127.0.0.1', port))
+            return True
+        except Exception:
+            return False
+
     def stop(self):
         self.running = False
+        self.save_state()  # Save on stop
         for s in [self.tcp_socket, self.udp_socket]:
             if s:
                 try: s.close()
@@ -774,8 +860,8 @@ class TeltonikaServer:
                                     self._close_tcp(s)
                             except ConnectionResetError:
                                 self._close_tcp(s)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                self.log(f"TCP client error: {e}", "ERROR")
 
                     for s in exceptional:
                         self._close_tcp(s)
@@ -792,6 +878,12 @@ class TeltonikaServer:
             buf = self.tcp_buffers.get(sock, b'')
 
         while len(buf) > 0:
+            # Magic kill packet for stale instance shutdown
+            if b'SERVER_DIE_NOW_PLEASE' in buf:
+                self.log("Received MAGIC KILL signal via TCP. Shutting down.", "STOP")
+                self.stop()
+                return
+
             # Ping
             if buf[0] == 0xFF:
                 buf = buf[1:]
@@ -865,6 +957,7 @@ class TeltonikaServer:
                             self.parsed_records = self.parsed_records[:2000]
                         if imei != 'Unknown':
                             self.interval_last_record[imei] = datetime.datetime.now()
+                        self._data_version += 1
                         self.data_event.set()
 
                     # Enqueue any scheduled commands
@@ -918,6 +1011,13 @@ class TeltonikaServer:
                         continue
 
                     data, addr = self.udp_socket.recvfrom(65535)
+
+                    # Magic kill packet for stale instance shutdown
+                    if data == b'SERVER_DIE_NOW_PLEASE':
+                        self.log("Received MAGIC KILL signal via UDP. Shutting down.", "STOP")
+                        self.stop()
+                        return
+
                     self._add_raw("RX", data, "UDP")
 
                     info = TeltonikaProtocol.parse_udp_packet(data)
@@ -949,6 +1049,7 @@ class TeltonikaServer:
                             if len(self.parsed_records) > 2000:
                                 self.parsed_records = self.parsed_records[:2000]
                             self.interval_last_record[imei] = datetime.datetime.now()
+                            self._data_version += 1
                             self.data_event.set()
 
                         self._enqueue_scheduled(imei)
@@ -1107,6 +1208,16 @@ class TeltonikaServer:
     # ═══════════════════════════════════════════════════════════════════════════
     #  Public API
     # ═══════════════════════════════════════════════════════════════════════════
+    def clear_data(self):
+        """Clear all stored data and save state."""
+        with self.lock:
+            self.parsed_records.clear()
+            self.raw_messages.clear()
+            self.log_messages.clear()
+            self.command_history.clear()
+            self._data_version += 1
+        self.save_state()
+
     def send_command(self, imei: str, command: str) -> bool:
         """Queue & attempt to send a command. Always returns True (queued)."""
         self.queue_command(imei, command)

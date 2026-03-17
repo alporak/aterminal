@@ -8,5 +8,6 @@ import "./logs.js";
 import "./com.js";
 import "./jira.js";
 import "./release.js";
+import "./bts.js";
 
 document.addEventListener("DOMContentLoaded", boot);

@@ -31,7 +31,7 @@ os.makedirs(CASES_DIR, exist_ok=True)
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
 # Default path to the universal-bts-tester installation
-_DEFAULT_BTS_PATH = r"C:\Users\orak.al\OneDrive - teltonika.lt\alp_work_files\tools\universal-bts-tester"
+_DEFAULT_BTS_PATH = os.path.join(ROOT, "third_party", "universal-bts-tester")
 
 # ── Step catalog (FMB-focused) ──────────────────────────────────────
 

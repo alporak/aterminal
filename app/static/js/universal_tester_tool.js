@@ -1,9 +1,9 @@
 /* ================================================================
-   BTS Tester Plugin – Drag/Drop Test Case Builder (FMB)
+   Universal Tester Tool Plugin – Drag/Drop Test Case Builder (FMB)
    ================================================================ */
 import { h, $, $$, api, toast, registerPlugin, icons } from "./core.js";
 
-const PLUGIN_ID = "bts_tester";
+const PLUGIN_ID = "universal_tester_tool";
 let _catalog = [];
 let _cases = [];
 let _currentCase = null;
@@ -20,7 +20,7 @@ let _lastBgStepStatus = "";
 function _connectBackgroundWS() {
   if (_bgWs && _bgWs.readyState <= 1) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  _bgWs = new WebSocket(`${proto}//${location.host}/ws/bts`);
+  _bgWs = new WebSocket(`${proto}//${location.host}/ws/universal-tester-tool`);
   _bgWs.onmessage = (evt) => {
     try {
       const data = JSON.parse(evt.data);
@@ -38,15 +38,15 @@ function _notifyFromStatus(data) {
 
   // Status transition notifications
   if (st !== _lastBgStatus) {
-    if (st === "completed") toast("BTS test completed!", "success", 5000);
+    if (st === "completed") toast("Universal Tester Tool test completed!", "success", 5000);
     else if (st === "failed") {
       const reason = data.fail_reason === "com_port"
-        ? "BTS test failed: COM port busy — close the port & NUKE RESET"
-        : "BTS test failed";
+        ? "Universal Tester Tool test failed: COM port busy — close the port & STOP & KILL"
+        : "Universal Tester Tool test failed";
       toast(reason, "error", 8000);
-    } else if (st === "stopped") toast("BTS test stopped", "warn", 4000);
+    } else if (st === "stopped") toast("Universal Tester Tool test stopped", "warn", 4000);
     else if (st === "running" && _lastBgStatus && _lastBgStatus !== "running")
-      toast("BTS test started", "info", 3000);
+      toast("Universal Tester Tool test started", "info", 3000);
     _lastBgStatus = st;
   }
 
@@ -98,7 +98,7 @@ let _dragData = null;
 // ── Main render ────────────────────────────────────────────────────
 
 registerPlugin({
-  id: PLUGIN_ID, name: "BTS Tester", order: 15,
+  id: PLUGIN_ID, name: "Universal Tester Tool", order: 15,
   svgIcon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 2v6m6-6v6M9 16v6m6-6v6M2 9h6m8 0h6M2 15h6m8 0h6"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>`,
 
   init(container) {
@@ -117,7 +117,7 @@ registerPlugin({
     } catch (e) {
       this._c.innerHTML = "";
       this._c.appendChild(h("div", { className: "card" },
-        h("p", { className: "text-muted" }, "BTS Tester unavailable: " + e.message)));
+        h("p", { className: "text-muted" }, "Universal Tester Tool unavailable: " + e.message)));
       return;
     }
     _currentCase = null;
@@ -128,9 +128,9 @@ registerPlugin({
     const c = this._c; c.innerHTML = "";
 
     // Top bar: case list + controls
-    const topBar = h("div", { className: "bts-topbar" },
-      h("h2", null, "BTS Tester"),
-      h("div", { className: "bts-topbar-actions" },
+    const topBar = h("div", { className: "utt-topbar" },
+      h("h2", null, "Universal Tester Tool"),
+      h("div", { className: "utt-topbar-actions" },
         h("button", { className: "btn btn-primary", onclick: () => this._newCase() },
           "+ New Test Case"),
       ),
@@ -147,21 +147,21 @@ registerPlugin({
   },
 
   _renderCaseList(c) {
-    // Settings card (BTS path + log directory)
+    // Settings card (Universal Tester Tool path + log directory)
     this._renderSettingsCard(c);
 
     if (!_cases.length) {
-      c.appendChild(h("div", { className: "bts-empty card" },
+      c.appendChild(h("div", { className: "utt-empty card" },
         h("div", { style: { textAlign: "center", padding: "2rem" } },
           h("p", { style: { fontSize: "3rem" } }, "🧪"),
           h("p", null, "No test cases yet. Create one to get started!"),
         )));
       return;
     }
-    const grid = h("div", { className: "bts-cases-grid" });
+    const grid = h("div", { className: "utt-cases-grid" });
     for (const cs of _cases) {
-      const card = h("div", { className: "card bts-case-card", onclick: () => this._loadCase(cs.id) },
-        h("div", { className: "bts-case-header" },
+      const card = h("div", { className: "card utt-case-card", onclick: () => this._loadCase(cs.id) },
+        h("div", { className: "utt-case-header" },
           h("strong", null, cs.name),
           h("button", { className: "btn btn-danger btn-sm", onclick: async (e) => {
             e.stopPropagation();
@@ -171,7 +171,7 @@ registerPlugin({
             this._renderMain();
           }}, "✕"),
         ),
-        h("div", { className: "bts-case-meta text-muted" },
+        h("div", { className: "utt-case-meta text-muted" },
           h("span", null, `Device: ${cs.device_name}`),
           h("span", null, `Steps: ${cs.steps_count}`),
           h("span", null, `Iterations: ${cs.iterations}`),
@@ -205,10 +205,10 @@ registerPlugin({
       onclick: () => { _currentCase = null; this._boot(); } },
       "← Back to Cases"));
 
-    const editorWrap = h("div", { className: "bts-editor" });
+    const editorWrap = h("div", { className: "utt-editor" });
 
     // ── Left panel: Step palette ───────────────────────────────
-    const palette = h("div", { className: "bts-palette" });
+    const palette = h("div", { className: "utt-palette" });
     palette.appendChild(h("h3", null, "Available Steps"));
     palette.appendChild(h("p", { className: "text-muted", style: { fontSize: "0.8rem" } },
       "Drag steps to the sequence area →"));
@@ -219,13 +219,13 @@ registerPlugin({
       categories[s.category].push(s);
     }
     for (const [cat, items] of Object.entries(categories)) {
-      palette.appendChild(h("div", { className: "bts-cat-label" }, cat));
+      palette.appendChild(h("div", { className: "utt-cat-label" }, cat));
       for (const item of items) {
         const el = h("div", {
-          className: "bts-palette-item",
+          className: "utt-palette-item",
           draggable: "true",
         },
-          h("span", { className: "bts-step-icon" }, item.icon),
+          h("span", { className: "utt-step-icon" }, item.icon),
           h("div", null,
             h("strong", null, item.label),
             h("div", { className: "text-muted", style: { fontSize: "0.75rem" } }, item.description),
@@ -246,37 +246,37 @@ registerPlugin({
     }
 
     // ── Center: Config header + Sequence ───────────────────────
-    const center = h("div", { className: "bts-center" });
+    const center = h("div", { className: "utt-center" });
 
     // Case config
-    const configCard = h("div", { className: "card bts-config-card" });
+    const configCard = h("div", { className: "card utt-config-card" });
     configCard.appendChild(h("h3", null, "Test Case Configuration"));
-    const configGrid = h("div", { className: "bts-config-grid" });
+    const configGrid = h("div", { className: "utt-config-grid" });
 
     const mkInput = (label, key, val, type = "text", opts = {}) => {
       const inp = h("input", {
         type, value: val, placeholder: label,
-        className: "bts-input",
+        className: "utt-input",
         ...opts,
       });
       inp.addEventListener("change", () => {
         if (type === "number") cs[key] = parseInt(inp.value) || 0;
         else cs[key] = inp.value;
       });
-      return h("label", { className: "bts-field" }, h("span", null, label), inp);
+      return h("label", { className: "utt-field" }, h("span", null, label), inp);
     };
 
     const mkIfaceInput = (label, key, val, type = "text") => {
       const inp = h("input", {
         type, value: val, placeholder: label,
-        className: "bts-input",
+        className: "utt-input",
       });
       inp.addEventListener("change", () => {
         if (!cs.interfaces) cs.interfaces = {};
         if (type === "number") cs.interfaces[key] = parseInt(inp.value) || 0;
         else cs.interfaces[key] = inp.value;
       });
-      return h("label", { className: "bts-field" }, h("span", null, label), inp);
+      return h("label", { className: "utt-field" }, h("span", null, label), inp);
     };
 
     configGrid.appendChild(mkInput("Test Name", "name", cs.name));
@@ -296,7 +296,7 @@ registerPlugin({
       if (!cs.interfaces) cs.interfaces = {};
       cs.interfaces.use_otii = otiiCheck.checked;
     });
-    configGrid.appendChild(h("label", { className: "bts-field bts-field-checkbox" },
+    configGrid.appendChild(h("label", { className: "utt-field utt-field-checkbox" },
       otiiCheck, h("span", null, "Use OTII Power Supply")));
 
     configCard.appendChild(configGrid);
@@ -307,7 +307,7 @@ registerPlugin({
     center.appendChild(h("p", { className: "text-muted", style: { fontSize: "0.8rem" } },
       "Drop steps here. They execute top to bottom. Drag to reorder."));
 
-    const seqArea = h("div", { className: "bts-sequence" });
+    const seqArea = h("div", { className: "utt-sequence" });
     this._renderSequence(seqArea, cs);
 
     // Drop zone for new items
@@ -335,7 +335,7 @@ registerPlugin({
     center.appendChild(seqArea);
 
     // Action buttons
-    const actions = h("div", { className: "bts-actions" },
+    const actions = h("div", { className: "utt-actions" },
       h("button", { className: "btn btn-primary", onclick: () => this._saveCase() }, "💾 Save"),
       h("button", { className: "btn", onclick: () => this._previewYaml() }, "📄 Preview YAML"),
       h("button", { className: "btn btn-success", onclick: () => this._runCase() }, "▶ Run Test"),
@@ -353,7 +353,7 @@ registerPlugin({
   _renderSequence(seqArea, cs) {
     seqArea.innerHTML = "";
     if (!cs.steps.length) {
-      seqArea.appendChild(h("div", { className: "bts-seq-empty" },
+      seqArea.appendChild(h("div", { className: "utt-seq-empty" },
         h("p", null, "Drop steps here to build your test sequence")));
       return;
     }
@@ -361,7 +361,7 @@ registerPlugin({
     cs.steps.forEach((step, idx) => {
       const catItem = _catalog.find(c => c.type === step.type) || {};
       const stepEl = h("div", {
-        className: "bts-step-item",
+        className: "utt-step-item",
         draggable: "true",
       });
 
@@ -406,11 +406,11 @@ registerPlugin({
       });
 
       // Step number + icon
-      const header = h("div", { className: "bts-step-header" },
-        h("span", { className: "bts-step-num" }, `${idx + 1}`),
-        h("span", { className: "bts-step-icon" }, catItem.icon || "?"),
+      const header = h("div", { className: "utt-step-header" },
+        h("span", { className: "utt-step-num" }, `${idx + 1}`),
+        h("span", { className: "utt-step-icon" }, catItem.icon || "?"),
         h("strong", null, catItem.label || step.type),
-        h("div", { className: "bts-step-actions" },
+        h("div", { className: "utt-step-actions" },
           h("button", { className: "btn btn-sm", onclick: () => {
             if (idx > 0) { [cs.steps[idx - 1], cs.steps[idx]] = [cs.steps[idx], cs.steps[idx - 1]]; this._renderSequence(seqArea, cs); }
           }}, "↑"),
@@ -431,7 +431,7 @@ registerPlugin({
       stepEl.appendChild(header);
 
       // Step-specific fields
-      const fields = h("div", { className: "bts-step-fields" });
+      const fields = h("div", { className: "utt-step-fields" });
       this._renderStepFields(fields, step, () => this._renderSequence(seqArea, cs));
       stepEl.appendChild(fields);
 
@@ -445,25 +445,25 @@ registerPlugin({
     const mkF = (label, key, val, type = "text", opts = {}) => {
       const inp = h("input", {
         type, value: val ?? "", placeholder: label,
-        className: "bts-input bts-input-sm",
+        className: "utt-input utt-input-sm",
         ...opts,
       });
       inp.addEventListener("change", () => {
         if (type === "number") step[key] = parseFloat(inp.value) || 0;
         else step[key] = inp.value;
       });
-      return h("label", { className: "bts-field-inline" }, h("span", null, label + ":"), inp);
+      return h("label", { className: "utt-field-inline" }, h("span", null, label + ":"), inp);
     };
 
     const mkSelect = (label, key, val, options) => {
-      const sel = h("select", { className: "bts-input bts-input-sm" });
+      const sel = h("select", { className: "utt-input utt-input-sm" });
       for (const opt of options) {
         const optEl = h("option", { value: opt }, opt);
         if (opt === val) optEl.selected = true;
         sel.appendChild(optEl);
       }
       sel.addEventListener("change", () => { step[key] = sel.value; });
-      return h("label", { className: "bts-field-inline" }, h("span", null, label + ":"), sel);
+      return h("label", { className: "utt-field-inline" }, h("span", null, label + ":"), sel);
     };
 
     if (t === "power_off" || t === "power_on") {
@@ -503,18 +503,18 @@ registerPlugin({
   },
 
   _renderArgsField(step) {
-    const wrap = h("div", { className: "bts-args-field" });
+    const wrap = h("div", { className: "utt-args-field" });
     const label = h("span", null, "Args (comma-separated):");
     const inp = h("input", {
       type: "text",
-      className: "bts-input bts-input-sm",
+      className: "utt-input utt-input-sm",
       value: (step.args || []).join(", "),
       placeholder: 'e.g. 0, 0, NaN, NaN',
     });
     inp.addEventListener("change", () => {
       step.args = inp.value.split(",").map(s => s.trim()).filter(Boolean);
     });
-    wrap.appendChild(h("label", { className: "bts-field-inline" }, label, inp));
+    wrap.appendChild(h("label", { className: "utt-field-inline" }, label, inp));
     return wrap;
   },
 
@@ -544,16 +544,16 @@ registerPlugin({
         body: JSON.stringify(cs),
       });
       // Show in a modal-like overlay
-      const overlay = h("div", { className: "bts-overlay" });
-      const modal = h("div", { className: "bts-modal" });
-      modal.appendChild(h("div", { className: "bts-modal-header" },
+      const overlay = h("div", { className: "utt-overlay" });
+      const modal = h("div", { className: "utt-modal" });
+      modal.appendChild(h("div", { className: "utt-modal-header" },
         h("h3", null, "Generated YAML Preview"),
         h("button", { className: "btn btn-sm", onclick: () => overlay.remove() }, "✕"),
       ));
 
       for (const [name, content] of Object.entries(preview)) {
         modal.appendChild(h("h4", null, name));
-        modal.appendChild(h("pre", { className: "bts-yaml-preview" }, content));
+        modal.appendChild(h("pre", { className: "utt-yaml-preview" }, content));
       }
 
       overlay.appendChild(modal);
@@ -580,26 +580,26 @@ registerPlugin({
   async _renderSettingsCard(container) {
     let cfg;
     try { cfg = await api(`/api/${PLUGIN_ID}/config`); }
-    catch { cfg = { bts_tester_path: "", bts_log_dir: "" }; }
+    catch { cfg = { universal_tester_tool_path: "", universal_tester_tool_log_dir: "" }; }
 
-    const card = h("div", { className: "card bts-settings-card" });
-    card.appendChild(h("h3", null, "⚙ BTS Settings"));
+    const card = h("div", { className: "card utt-settings-card" });
+    card.appendChild(h("h3", null, "⚙ Universal Tester Tool Settings"));
 
-    const grid = h("div", { className: "bts-config-grid" });
+    const grid = h("div", { className: "utt-config-grid" });
 
     const mkCfgInput = (label, key, val, placeholder) => {
       const inp = h("input", {
         type: "text", value: val || "", placeholder,
-        className: "bts-input",
+        className: "utt-input",
       });
       inp.dataset.cfgKey = key;
-      return h("label", { className: "bts-field" }, h("span", null, label), inp);
+      return h("label", { className: "utt-field" }, h("span", null, label), inp);
     };
 
-    grid.appendChild(mkCfgInput("BTS Tester Path", "bts_tester_path",
-      cfg.bts_tester_path, "C:\\path\\to\\universal-bts-tester"));
-    grid.appendChild(mkCfgInput("Log Directory", "bts_log_dir",
-      cfg.bts_log_dir, "C:\\path\\to\\logs"));
+    grid.appendChild(mkCfgInput("Universal Tester Tool Path", "universal_tester_tool_path",
+      cfg.universal_tester_tool_path, "C:\\path\\to\\universal-tester-tool"));
+    grid.appendChild(mkCfgInput("Log Directory", "universal_tester_tool_log_dir",
+      cfg.universal_tester_tool_log_dir, "C:\\path\\to\\logs"));
 
     card.appendChild(grid);
 
@@ -614,7 +614,7 @@ registerPlugin({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
-          toast("BTS settings saved", "success");
+          toast("Universal Tester Tool settings saved", "success");
         } catch (e) { toast("Save failed: " + e.message, "error"); }
       }
     }, "Save Settings");
@@ -624,18 +624,18 @@ registerPlugin({
   },
 
   _renderStatusSection(container) {
-    const statusCard = h("div", { className: "card bts-status-card" });
+    const statusCard = h("div", { className: "card utt-status-card" });
     statusCard.appendChild(h("h3", null, "Run Status"));
 
-    const statusBody = h("div", { className: "bts-status-body", id: "bts-status-body" });
+    const statusBody = h("div", { className: "utt-status-body", id: "utt-status-body" });
     statusBody.appendChild(h("p", { className: "text-muted" }, "Loading status..."));
     statusCard.appendChild(statusBody);
 
     // Step progress list
-    const stepsBox = h("div", { className: "bts-steps-progress", id: "bts-steps-progress" });
+    const stepsBox = h("div", { className: "utt-steps-progress", id: "utt-steps-progress" });
     statusCard.appendChild(stepsBox);
 
-    const logBox = h("pre", { className: "bts-log-box", id: "bts-log-box" });
+    const logBox = h("pre", { className: "utt-log-box", id: "utt-log-box" });
     statusCard.appendChild(logBox);
 
     container.appendChild(statusCard);
@@ -653,13 +653,13 @@ registerPlugin({
   },
 
   _updateStatusUI(status) {
-    const body = document.getElementById("bts-status-body");
-    const logBox = document.getElementById("bts-log-box");
-    const stepsBox = document.getElementById("bts-steps-progress");
+    const body = document.getElementById("utt-status-body");
+    const logBox = document.getElementById("utt-log-box");
+    const stepsBox = document.getElementById("utt-steps-progress");
     if (!body) return;
     body.innerHTML = "";
 
-    const badge = (text, cls) => h("span", { className: `bts-badge bts-badge-${cls}` }, text);
+    const badge = (text, cls) => h("span", { className: `utt-badge utt-badge-${cls}` }, text);
 
     const statusBadge = {
       idle: badge("Idle", "idle"),
@@ -669,7 +669,7 @@ registerPlugin({
       stopped: badge("Stopped", "warn"),
     }[status.status] || badge(status.status, "idle");
 
-    const info = h("div", { className: "bts-status-info" },
+    const info = h("div", { className: "utt-status-info" },
       h("div", null, h("strong", null, "Status: "), statusBadge),
     );
 
@@ -694,11 +694,11 @@ registerPlugin({
     const btnRow = h("div", { style: { marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center" } });
 
     const nukeBtn = h("button", {
-      className: "btn bts-nuke-btn",
+      className: "btn utt-nuke-btn",
       onclick: async () => {
         try {
           await api(`/api/${PLUGIN_ID}/reset`, { method: "POST" });
-          toast("NUKED — all BTS processes killed, ready to go", "success", 3000);
+          toast("STOP & KILL complete — all Universal Tester Tool processes killed", "success", 3000);
         } catch (e) { toast("Reset failed: " + e.message, "error"); }
         this._refreshStatus();
       },
@@ -709,7 +709,7 @@ registerPlugin({
 
     // COM port guidance banner
     if (status.fail_reason === "com_port") {
-      const guidance = h("div", { className: "bts-com-guidance" },
+      const guidance = h("div", { className: "utt-com-guidance" },
         h("strong", null, "⚠ COM port is busy or locked"),
         h("p", null, "Another program (PuTTY, Catcher, Device Manager, etc.) is holding the COM port open."),
         h("ol", null,
@@ -731,16 +731,16 @@ registerPlugin({
       for (const step of status.steps) {
         const icon = stepIcons[step.status] || "○";
         const cls = step.status || "pending";
-        const row = h("div", { className: `bts-step-progress bts-sp-${cls}` },
-          h("span", { className: "bts-sp-icon" }, icon),
-          h("span", { className: "bts-sp-num" }, `${step.index + 1}`),
-          h("span", { className: "bts-sp-label" }, step.label),
+        const row = h("div", { className: `utt-step-progress utt-sp-${cls}` },
+          h("span", { className: "utt-sp-icon" }, icon),
+          h("span", { className: "utt-sp-num" }, `${step.index + 1}`),
+          h("span", { className: "utt-sp-label" }, step.label),
         );
         if (step.detail) {
-          row.appendChild(h("span", { className: "bts-sp-detail" }, step.detail));
+          row.appendChild(h("span", { className: "utt-sp-detail" }, step.detail));
         }
         if (step.result) {
-          row.appendChild(h("span", { className: `bts-sp-result bts-sp-${cls}` }, step.result));
+          row.appendChild(h("span", { className: `utt-sp-result utt-sp-${cls}` }, step.result));
         }
         stepsBox.appendChild(row);
       }
@@ -763,7 +763,7 @@ registerPlugin({
   _connectWS() {
     if (_ws && _ws.readyState <= 1) return; // already connected or connecting
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    _ws = new WebSocket(`${proto}//${location.host}/ws/bts`);
+    _ws = new WebSocket(`${proto}//${location.host}/ws/universal-tester-tool`);
     _ws.onmessage = (evt) => {
       try {
         const data = JSON.parse(evt.data);
@@ -774,3 +774,4 @@ registerPlugin({
     _ws.onerror = () => { _ws = null; };
   },
 });
+

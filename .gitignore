@@ -5,5 +5,6 @@ Log*
 toolkit_settings.json
 output/*
 .vscode/*
-bts-tester/generated/*
-bts-tester/test_cases/*
+universal-tester-tool/generated/*
+universal-tester-tool/test_cases/*
+

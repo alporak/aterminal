@@ -1,7 +1,7 @@
 """
-BTS Tester plugin – Drag/drop test case builder for Universal BTS Tester (FMB).
+Universal Tester Tool plugin – Drag/drop test case builder for Universal Tester Tool (FMB).
 
-Generates YAML configs, launches the universal-bts-tester, and monitors runs.
+Generates YAML configs, launches the universal tester engine, and monitors runs.
 """
 
 from __future__ import annotations
@@ -25,13 +25,21 @@ from app import config
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Paths ───────────────────────────────────────────────────────────
-CASES_DIR = os.path.join(ROOT, "bts-tester", "test_cases")
-GENERATED_DIR = os.path.join(ROOT, "bts-tester", "generated")
+CASES_DIR = os.path.join(ROOT, "universal-tester-tool", "test_cases")
+GENERATED_DIR = os.path.join(ROOT, "universal-tester-tool", "generated")
 os.makedirs(CASES_DIR, exist_ok=True)
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
-# Default path to the universal-bts-tester installation
-_DEFAULT_BTS_PATH = os.path.join(ROOT, "third_party", "universal-bts-tester")
+# Default path to the Universal Tester Tool engine installation
+_DEFAULT_UNIVERSAL_TESTER_TOOL_PATH = os.path.join(ROOT, "third_party", "universal-tester-tool")
+
+
+def _resolve_utt_root(path: str | None) -> str:
+    """Resolve configured engine path to an absolute path."""
+    candidate = (path or "").strip() or _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH
+    if os.path.isabs(candidate):
+        return os.path.normpath(candidate)
+    return os.path.normpath(os.path.join(ROOT, candidate))
 
 # ── Step catalog (FMB-focused) ──────────────────────────────────────
 
@@ -117,7 +125,7 @@ _STEP_LABELS = {
     "read_catcher": "Read Catcher",
 }
 
-# Maps step type → the print the bts-tester emits when hitting that func
+# Maps step type -> the print the Universal Tester Tool engine emits when hitting that func
 _FUNC_PRINTS = {
     "power_off": "OtiiSetOut",
     "power_on": "OtiiSetOut",
@@ -330,8 +338,8 @@ def _force_kill_process_tree(proc: Optional[subprocess.Popen]):
         pass
 
 
-def _nuke_all_bts_processes():
-    """Kill every Python process whose command-line references bts-tester/launcher.
+def _nuke_all_universal_tester_tool_processes():
+    """Kill every Python process whose command-line references universal-tester-tool/launcher.
 
     Uses PowerShell's Get-CimInstance (reliable, unlike deprecated wmic) to find
     orphaned processes, then taskkill /T /F each one.
@@ -343,7 +351,7 @@ def _nuke_all_bts_processes():
         # PowerShell one-liner: get PIDs of python processes matching our keywords
         ps_cmd = (
             "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='python3.exe' or Name='pythonw.exe'\" "
-            "| Where-Object { $_.CommandLine -match 'launcher\\.py|universal-bts-tester|bts-tester' } "
+            "| Where-Object { $_.CommandLine -match 'launcher\\.py|universal-tester-tool' } "
             "| Select-Object -ExpandProperty ProcessId"
         )
         result = subprocess.run(
@@ -547,7 +555,7 @@ def _generate_test_yaml(steps: list[dict]) -> str:
 def _generate_test_main_yaml(case: dict, test_file_rel: str) -> str:
     """Generate test_main.yaml.
 
-    run_time controls the *internal* loop of the universal-bts-tester
+    run_time controls the *internal* loop of the Universal Tester Tool engine
     ("0s" = run once, "30m" = keep running for 30 min, etc.).
     Our external iteration loop re-launches the process N times.
     """
@@ -571,7 +579,9 @@ def _prepare_run_directory(case: dict) -> dict:
     run_dir = os.path.join(GENERATED_DIR, case_id)
     os.makedirs(run_dir, exist_ok=True)
 
-    bts_root = config.load().get("bts_tester_path", _DEFAULT_BTS_PATH)
+    utt_root = _resolve_utt_root(
+        config.load().get("universal_tester_tool_path", _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH)
+    )
 
     # Test steps YAML
     test_yaml = _generate_test_yaml(case.get("steps", []))
@@ -579,8 +589,8 @@ def _prepare_run_directory(case: dict) -> dict:
     with open(test_file, "w", encoding="utf-8") as f:
         f.write(test_yaml)
 
-    # Calculate relative path from bts_root
-    test_file_rel = os.path.relpath(test_file, bts_root).replace("\\", "/")
+    # Calculate relative path from utt_root
+    test_file_rel = os.path.relpath(test_file, utt_root).replace("\\", "/")
 
     # test_main.yaml
     test_main_yaml = _generate_test_main_yaml(case, test_file_rel)
@@ -589,7 +599,7 @@ def _prepare_run_directory(case: dict) -> dict:
         f.write(test_main_yaml)
 
     # Store the test_main path for settings.yaml
-    test_main_rel = os.path.relpath(test_main_file, bts_root).replace("\\", "/")
+    test_main_rel = os.path.relpath(test_main_file, utt_root).replace("\\", "/")
     case["_test_main_path"] = test_main_rel
 
     # interfaces.yaml
@@ -604,7 +614,7 @@ def _prepare_run_directory(case: dict) -> dict:
     with open(settings_file, "w", encoding="utf-8") as f:
         f.write(settings_yaml)
 
-    # interfaces_desc.yaml – tells bts-tester to store serial output to file
+    # interfaces_desc.yaml - tells the Universal Tester Tool engine to store serial output to file
     iface_desc_lines = ['- !Description', '    name: "Terminal"', '    action: "store"']
     iface = case.get("interfaces", {})
     if iface.get("catcher_port"):
@@ -615,17 +625,17 @@ def _prepare_run_directory(case: dict) -> dict:
 
     return {
         "run_dir": run_dir,
-        "bts_root": bts_root,
-        "run_dir_rel": os.path.relpath(run_dir, bts_root).replace("\\", "/") + "/",
+        "utt_root": utt_root,
+        "run_dir_rel": os.path.relpath(run_dir, utt_root).replace("\\", "/") + "/",
     }
 
 
 # ── Test runner ─────────────────────────────────────────────────────
 
 def _run_test_thread(case: dict, paths: dict):
-    """Run the universal-bts-tester in a background thread."""
+    """Run the Universal Tester Tool engine in a background thread."""
     global _run
-    bts_root = paths["bts_root"]
+    utt_root = paths["utt_root"]
     run_dir_rel = paths["run_dir_rel"]
 
     iterations = case.get("iterations", 1)
@@ -645,7 +655,7 @@ def _run_test_thread(case: dict, paths: dict):
         # pc-ble-driver-py native dependency that can't install on Py3.11).
         launcher = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "bts-tester", "launcher.py",
+            "universal-tester-tool", "launcher.py",
         )
         cmd = [
             sys.executable, "-u", launcher,
@@ -653,12 +663,12 @@ def _run_test_thread(case: dict, paths: dict):
             "-paths", run_dir_rel,
         ]
         _run.append_log(f"[CMD] {' '.join(cmd)}")
-        _run.append_log(f"[CWD] {bts_root}")
+        _run.append_log(f"[CWD] {utt_root}")
         _run.append_log(f"[CFG] run_dir_rel={run_dir_rel}")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["BTS_ROOT"] = bts_root
+        env["UNIVERSAL_TESTER_TOOL_ROOT"] = utt_root
 
         try:
             proc = subprocess.Popen(
@@ -666,7 +676,7 @@ def _run_test_thread(case: dict, paths: dict):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                cwd=bts_root,
+                cwd=utt_root,
                 env=env,
                 bufsize=1,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
@@ -775,7 +785,7 @@ def _save_log_file():
     if not _run.log_lines:
         return
     cfg = config.load()
-    log_dir = cfg.get("bts_log_dir", os.path.join(ROOT, "output", "bts_logs"))
+    log_dir = cfg.get("universal_tester_tool_log_dir", os.path.join(ROOT, "output", "universal_tester_tool_logs"))
     os.makedirs(log_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     case_slug = _run.case_name.replace(" ", "_")[:30] if _run.case_name else "unknown"
@@ -808,51 +818,51 @@ class RunRequest(BaseModel):
 
 # ── Plugin class ────────────────────────────────────────────────────
 
-class BTSTesterPlugin(ToolkitPlugin):
-    id = "bts_tester"
-    name = "BTS Tester"
+class UniversalTesterToolPlugin(ToolkitPlugin):
+    id = "universal_tester_tool"
+    name = "Universal Tester Tool"
     icon = "🧪"
     order = 15
 
     def register_routes(self, app: FastAPI):
 
         # ── Step catalog ────────────────────────────────────────
-        @app.get("/api/bts_tester/catalog")
+        @app.get("/api/universal_tester_tool/catalog")
         async def get_catalog():
             return STEP_CATALOG
 
-        # ── BTS configuration ──────────────────────────────────
+        # ── Universal Tester Tool configuration ───────────────
 
-        @app.get("/api/bts_tester/config")
-        async def get_bts_config():
+        @app.get("/api/universal_tester_tool/config")
+        async def get_universal_tester_tool_config():
             cfg = config.load()
             return {
-                "bts_tester_path": cfg.get("bts_tester_path", _DEFAULT_BTS_PATH),
-                "bts_log_dir": cfg.get("bts_log_dir", os.path.join(ROOT, "output", "bts_logs")),
+                "universal_tester_tool_path": cfg.get("universal_tester_tool_path", _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH),
+                "universal_tester_tool_log_dir": cfg.get("universal_tester_tool_log_dir", os.path.join(ROOT, "output", "universal_tester_tool_logs")),
             }
 
-        @app.put("/api/bts_tester/config")
-        async def update_bts_config(body: dict):
+        @app.put("/api/universal_tester_tool/config")
+        async def update_universal_tester_tool_config(body: dict):
             updates = {}
-            if "bts_tester_path" in body:
-                p = body["bts_tester_path"].strip()
+            if "universal_tester_tool_path" in body:
+                p = body["universal_tester_tool_path"].strip()
                 if p:
-                    updates["bts_tester_path"] = p
-            if "bts_log_dir" in body:
-                p = body["bts_log_dir"].strip()
+                    updates["universal_tester_tool_path"] = p
+            if "universal_tester_tool_log_dir" in body:
+                p = body["universal_tester_tool_log_dir"].strip()
                 if p:
-                    updates["bts_log_dir"] = p
+                    updates["universal_tester_tool_log_dir"] = p
             if updates:
                 config.save(updates)
             cfg = config.load()
             return {
-                "bts_tester_path": cfg.get("bts_tester_path", _DEFAULT_BTS_PATH),
-                "bts_log_dir": cfg.get("bts_log_dir", os.path.join(ROOT, "output", "bts_logs")),
+                "universal_tester_tool_path": cfg.get("universal_tester_tool_path", _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH),
+                "universal_tester_tool_log_dir": cfg.get("universal_tester_tool_log_dir", os.path.join(ROOT, "output", "universal_tester_tool_logs")),
             }
 
         # ── CRUD for test cases ─────────────────────────────────
 
-        @app.get("/api/bts_tester/cases")
+        @app.get("/api/universal_tester_tool/cases")
         async def list_cases():
             cases = []
             for fname in sorted(os.listdir(CASES_DIR)):
@@ -872,7 +882,7 @@ class BTSTesterPlugin(ToolkitPlugin):
                         pass
             return cases
 
-        @app.get("/api/bts_tester/cases/{case_id}")
+        @app.get("/api/universal_tester_tool/cases/{case_id}")
         async def get_case(case_id: str):
             fpath = os.path.join(CASES_DIR, f"{case_id}.json")
             if not os.path.exists(fpath):
@@ -881,7 +891,7 @@ class BTSTesterPlugin(ToolkitPlugin):
             with open(fpath, "r", encoding="utf-8") as f:
                 return json.load(f)
 
-        @app.post("/api/bts_tester/cases")
+        @app.post("/api/universal_tester_tool/cases")
         async def save_case(body: TestCaseIn):
             case_id = body.name.replace(" ", "_").lower()[:40]
             # Sanitize case_id: only allow alphanumeric, underscore, dash
@@ -898,7 +908,7 @@ class BTSTesterPlugin(ToolkitPlugin):
             # Return the full saved case so the frontend can sync
             return data
 
-        @app.delete("/api/bts_tester/cases/{case_id}")
+        @app.delete("/api/universal_tester_tool/cases/{case_id}")
         async def delete_case(case_id: str):
             import re
             if not re.match(r"^[a-zA-Z0-9_\-]+$", case_id):
@@ -913,7 +923,7 @@ class BTSTesterPlugin(ToolkitPlugin):
 
         # ── Preview generated YAML ──────────────────────────────
 
-        @app.post("/api/bts_tester/preview")
+        @app.post("/api/universal_tester_tool/preview")
         async def preview_yaml(body: TestCaseIn):
             data = body.dict()
             data["id"] = "preview"
@@ -926,7 +936,7 @@ class BTSTesterPlugin(ToolkitPlugin):
 
         # ── Run controls ────────────────────────────────────────
 
-        @app.post("/api/bts_tester/run/{case_id}")
+        @app.post("/api/universal_tester_tool/run/{case_id}")
         async def start_run(case_id: str):
             global _run
             if _run.running:
@@ -946,10 +956,12 @@ class BTSTesterPlugin(ToolkitPlugin):
             with open(fpath, "r", encoding="utf-8") as f:
                 case = json.load(f)
 
-            bts_root = config.load().get("bts_tester_path", _DEFAULT_BTS_PATH)
-            if not os.path.isdir(bts_root):
+            utt_root = _resolve_utt_root(
+                config.load().get("universal_tester_tool_path", _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH)
+            )
+            if not os.path.isdir(utt_root):
                 from fastapi import HTTPException
-                raise HTTPException(400, f"BTS tester path not found: {bts_root}")
+                raise HTTPException(400, f"Universal Tester Tool path not found: {utt_root}")
 
             paths = _prepare_run_directory(case)
 
@@ -966,7 +978,7 @@ class BTSTesterPlugin(ToolkitPlugin):
 
             return {"run_id": _run.run_id, "status": "started"}
 
-        @app.post("/api/bts_tester/stop")
+        @app.post("/api/universal_tester_tool/stop")
         async def stop_run():
             global _run
             if not _run.running and _run.status == "idle":
@@ -978,30 +990,30 @@ class BTSTesterPlugin(ToolkitPlugin):
             # async handler returns instantly and uvicorn stays responsive.
             def _do_nuke():
                 _force_kill_process_tree(proc)
-                _nuke_all_bts_processes()
+                _nuke_all_universal_tester_tool_processes()
             threading.Thread(target=_do_nuke, daemon=True).start()
             _run.reset()
             return {"status": "idle"}
 
-        @app.post("/api/bts_tester/reset")
+        @app.post("/api/universal_tester_tool/reset")
         async def reset_run():
             global _run
             _run.running = False
             proc = _run.process
             def _do_nuke():
                 _force_kill_process_tree(proc)
-                _nuke_all_bts_processes()
+                _nuke_all_universal_tester_tool_processes()
             threading.Thread(target=_do_nuke, daemon=True).start()
             _run.reset()
             return {"status": "idle"}
 
-        @app.get("/api/bts_tester/status")
+        @app.get("/api/universal_tester_tool/status")
         async def get_status():
             return _run.to_dict()
 
         # ── COM port discovery ──────────────────────────────────
 
-        @app.get("/api/bts_tester/ports")
+        @app.get("/api/universal_tester_tool/ports")
         async def list_ports():
             try:
                 import serial.tools.list_ports
@@ -1016,8 +1028,8 @@ class BTSTesterPlugin(ToolkitPlugin):
 
         # ── WebSocket for live log streaming ────────────────────
 
-        @app.websocket("/ws/bts")
-        async def ws_bts(ws: WebSocket):
+        @app.websocket("/ws/universal-tester-tool")
+        async def ws_universal_tester_tool(ws: WebSocket):
             await ws.accept()
             _ws_clients.add(ws)
             last_len = 0
@@ -1056,4 +1068,5 @@ class BTSTesterPlugin(ToolkitPlugin):
 
 import asyncio
 
-plugin = BTSTesterPlugin()
+plugin = UniversalTesterToolPlugin()
+

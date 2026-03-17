@@ -1538,47 +1538,47 @@ table tr[style*="cursor"]:hover td {
 }
 
 /* ================================================================
-   BTS Tester Plugin
+   Universal Tester Tool Plugin
    ================================================================ */
 
 /* ── Top bar ─────────────────────────────────────────────────── */
-.bts-topbar {
+.utt-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--sp-4) 0;
 }
-.bts-topbar h2 { font-size: 1.4rem; font-weight: 700; }
-.bts-topbar-actions { display: flex; gap: var(--sp-2); }
+.utt-topbar h2 { font-size: 1.4rem; font-weight: 700; }
+.utt-topbar-actions { display: flex; gap: var(--sp-2); }
 
 /* ── Case cards grid ────────────────────────────────────────── */
-.bts-cases-grid {
+.utt-cases-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--sp-4);
 }
-.bts-case-card {
+.utt-case-card {
   cursor: pointer;
   transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
 }
-.bts-case-card:hover {
+.utt-case-card:hover {
   border-color: var(--tk-green);
   box-shadow: 0 0 0 1px var(--tk-green-glow);
 }
-.bts-case-header {
+.utt-case-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: var(--sp-2);
 }
-.bts-case-meta {
+.utt-case-meta {
   display: flex;
   gap: var(--sp-4);
   font-size: 0.82rem;
 }
 
 /* ── Editor layout ──────────────────────────────────────────── */
-.bts-editor {
+.utt-editor {
   display: flex;
   gap: var(--sp-4);
   height: calc(100vh - 120px);
@@ -1586,7 +1586,7 @@ table tr[style*="cursor"]:hover td {
 }
 
 /* ── Palette (left) ─────────────────────────────────────────── */
-.bts-palette {
+.utt-palette {
   width: 260px;
   min-width: 220px;
   overflow-y: auto;
@@ -1596,8 +1596,8 @@ table tr[style*="cursor"]:hover td {
   padding: var(--sp-4);
   flex-shrink: 0;
 }
-.bts-palette h3 { font-size: 1rem; margin-bottom: var(--sp-2); }
-.bts-cat-label {
+.utt-palette h3 { font-size: 1rem; margin-bottom: var(--sp-2); }
+.utt-cat-label {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1605,7 +1605,7 @@ table tr[style*="cursor"]:hover td {
   margin-top: var(--sp-3);
   margin-bottom: var(--sp-1);
 }
-.bts-palette-item {
+.utt-palette-item {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -1617,49 +1617,49 @@ table tr[style*="cursor"]:hover td {
   background: var(--tk-navy-mid);
   transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
 }
-.bts-palette-item:hover {
+.utt-palette-item:hover {
   border-color: var(--tk-green);
   background: var(--tk-surface);
 }
-.bts-palette-item.dragging {
+.utt-palette-item.dragging {
   opacity: 0.5;
   border-color: var(--tk-green);
 }
-.bts-step-icon { font-size: 1.3rem; line-height: 1; flex-shrink: 0; }
+.utt-step-icon { font-size: 1.3rem; line-height: 1; flex-shrink: 0; }
 
 /* ── Center panel ───────────────────────────────────────────── */
-.bts-center {
+.utt-center {
   flex: 1;
   overflow-y: auto;
   padding-right: var(--sp-2);
 }
 
 /* ── Config card ────────────────────────────────────────────── */
-.bts-config-card { margin-bottom: var(--sp-4); }
-.bts-config-card h3 { font-size: 1rem; margin-bottom: var(--sp-3); }
-.bts-config-grid {
+.utt-config-card { margin-bottom: var(--sp-4); }
+.utt-config-card h3 { font-size: 1rem; margin-bottom: var(--sp-3); }
+.utt-config-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--sp-3);
 }
-.bts-field {
+.utt-field {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
   font-size: 0.82rem;
 }
-.bts-field span { color: var(--tk-fg-dim); }
-.bts-field-checkbox {
+.utt-field span { color: var(--tk-fg-dim); }
+.utt-field-checkbox {
   flex-direction: row;
   align-items: center;
   gap: var(--sp-2);
 }
-.bts-field-checkbox input[type="checkbox"] {
+.utt-field-checkbox input[type="checkbox"] {
   width: 16px;
   height: 16px;
   accent-color: var(--tk-green);
 }
-.bts-input {
+.utt-input {
   background: var(--tk-navy);
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-sm);
@@ -1670,13 +1670,13 @@ table tr[style*="cursor"]:hover td {
   outline: none;
   transition: border-color var(--duration) var(--ease);
 }
-.bts-input:focus { border-color: var(--tk-green); }
-.bts-input-sm { padding: var(--sp-1) var(--sp-2); font-size: 0.8rem; }
-.bts-input option { background: var(--tk-navy); color: var(--tk-fg); }
-select.bts-input { cursor: pointer; }
+.utt-input:focus { border-color: var(--tk-green); }
+.utt-input-sm { padding: var(--sp-1) var(--sp-2); font-size: 0.8rem; }
+.utt-input option { background: var(--tk-navy); color: var(--tk-fg); }
+select.utt-input { cursor: pointer; }
 
 /* ── Sequence area ──────────────────────────────────────────── */
-.bts-sequence {
+.utt-sequence {
   min-height: 120px;
   border: 2px dashed var(--tk-border);
   border-radius: var(--radius);
@@ -1684,18 +1684,18 @@ select.bts-input { cursor: pointer; }
   margin-bottom: var(--sp-4);
   transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
 }
-.bts-sequence.drag-over {
+.utt-sequence.drag-over {
   border-color: var(--tk-green);
   background: var(--tk-green-glow);
 }
-.bts-seq-empty {
+.utt-seq-empty {
   text-align: center;
   padding: var(--sp-8);
   color: var(--tk-fg-muted);
 }
 
 /* ── Step item in sequence ──────────────────────────────────── */
-.bts-step-item {
+.utt-step-item {
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-sm);
   padding: var(--sp-3);
@@ -1704,19 +1704,19 @@ select.bts-input { cursor: pointer; }
   cursor: grab;
   transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
 }
-.bts-step-item:hover { border-color: var(--tk-border-light); }
-.bts-step-item.dragging { opacity: 0.4; }
-.bts-step-item.drag-target {
+.utt-step-item:hover { border-color: var(--tk-border-light); }
+.utt-step-item.dragging { opacity: 0.4; }
+.utt-step-item.drag-target {
   border-color: var(--tk-green);
   box-shadow: 0 0 0 2px var(--tk-green-glow);
 }
-.bts-step-header {
+.utt-step-header {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   margin-bottom: var(--sp-2);
 }
-.bts-step-num {
+.utt-step-num {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1729,28 +1729,28 @@ select.bts-input { cursor: pointer; }
   font-weight: 700;
   flex-shrink: 0;
 }
-.bts-step-actions {
+.utt-step-actions {
   margin-left: auto;
   display: flex;
   gap: var(--sp-1);
 }
-.bts-step-fields {
+.utt-step-fields {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
   padding-left: 30px;
 }
-.bts-field-inline {
+.utt-field-inline {
   display: flex;
   align-items: center;
   gap: var(--sp-1);
   font-size: 0.8rem;
 }
-.bts-field-inline span { color: var(--tk-fg-dim); white-space: nowrap; }
-.bts-field-inline .bts-input { width: auto; min-width: 80px; }
+.utt-field-inline span { color: var(--tk-fg-dim); white-space: nowrap; }
+.utt-field-inline .utt-input { width: auto; min-width: 80px; }
 
 /* ── Actions row ────────────────────────────────────────────── */
-.bts-actions {
+.utt-actions {
   display: flex;
   gap: var(--sp-2);
   margin-bottom: var(--sp-4);
@@ -1764,16 +1764,16 @@ select.bts-input { cursor: pointer; }
 .btn-success:hover { background: var(--tk-green-dim); }
 
 /* ── Status card ────────────────────────────────────────────── */
-.bts-status-card { margin-top: var(--sp-4); }
-.bts-status-card h3 { font-size: 1rem; margin-bottom: var(--sp-3); }
-.bts-status-info {
+.utt-status-card { margin-top: var(--sp-4); }
+.utt-status-card h3 { font-size: 1rem; margin-bottom: var(--sp-3); }
+.utt-status-info {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-3) var(--sp-6);
   align-items: center;
   margin-bottom: var(--sp-3);
 }
-.bts-badge {
+.utt-badge {
   display: inline-block;
   padding: 2px 10px;
   border-radius: 999px;
@@ -1781,20 +1781,20 @@ select.bts-input { cursor: pointer; }
   font-weight: 600;
   text-transform: uppercase;
 }
-.bts-badge-idle { background: var(--tk-surface); color: var(--tk-fg-dim); }
-.bts-badge-running { background: var(--tk-blue-dim); color: var(--tk-blue); }
-.bts-badge-success { background: var(--tk-green-glow); color: var(--tk-green); }
-.bts-badge-error { background: var(--tk-red-dim); color: var(--tk-red); }
-.bts-badge-warn { background: var(--tk-yellow-dim); color: var(--tk-yellow); }
+.utt-badge-idle { background: var(--tk-surface); color: var(--tk-fg-dim); }
+.utt-badge-running { background: var(--tk-blue-dim); color: var(--tk-blue); }
+.utt-badge-success { background: var(--tk-green-glow); color: var(--tk-green); }
+.utt-badge-error { background: var(--tk-red-dim); color: var(--tk-red); }
+.utt-badge-warn { background: var(--tk-yellow-dim); color: var(--tk-yellow); }
 
 /* ── Step progress list ─────────────────────────────────────── */
-.bts-steps-progress {
+.utt-steps-progress {
   margin-bottom: var(--sp-3);
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
-.bts-step-progress {
+.utt-step-progress {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -1803,28 +1803,28 @@ select.bts-input { cursor: pointer; }
   border-bottom: 1px solid var(--tk-border);
   transition: background var(--duration) var(--ease);
 }
-.bts-step-progress:last-child { border-bottom: none; }
-.bts-sp-pending { color: var(--tk-fg-muted); }
-.bts-sp-running {
+.utt-step-progress:last-child { border-bottom: none; }
+.utt-sp-pending { color: var(--tk-fg-muted); }
+.utt-sp-running {
   background: var(--tk-blue-dim);
   color: var(--tk-fg);
 }
-.bts-sp-passed { color: var(--tk-green); }
-.bts-sp-failed { color: var(--tk-red); }
-.bts-sp-icon {
+.utt-sp-passed { color: var(--tk-green); }
+.utt-sp-failed { color: var(--tk-red); }
+.utt-sp-icon {
   font-size: 1rem;
   width: 18px;
   text-align: center;
   flex-shrink: 0;
 }
-.bts-sp-running .bts-sp-icon {
-  animation: bts-pulse 1.2s ease-in-out infinite;
+.utt-sp-running .utt-sp-icon {
+  animation: utt-pulse 1.2s ease-in-out infinite;
 }
-@keyframes bts-pulse {
+@keyframes utt-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
-.bts-sp-num {
+.utt-sp-num {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1837,11 +1837,11 @@ select.bts-input { cursor: pointer; }
   background: var(--tk-surface);
   color: var(--tk-fg-dim);
 }
-.bts-sp-running .bts-sp-num { background: var(--tk-blue); color: #fff; }
-.bts-sp-passed .bts-sp-num { background: var(--tk-green); color: var(--tk-navy); }
-.bts-sp-failed .bts-sp-num { background: var(--tk-red); color: #fff; }
-.bts-sp-label { font-weight: 500; white-space: nowrap; }
-.bts-sp-detail {
+.utt-sp-running .utt-sp-num { background: var(--tk-blue); color: #fff; }
+.utt-sp-passed .utt-sp-num { background: var(--tk-green); color: var(--tk-navy); }
+.utt-sp-failed .utt-sp-num { background: var(--tk-red); color: #fff; }
+.utt-sp-label { font-weight: 500; white-space: nowrap; }
+.utt-sp-detail {
   color: var(--tk-fg-dim);
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -1850,7 +1850,7 @@ select.bts-input { cursor: pointer; }
   white-space: nowrap;
   max-width: 280px;
 }
-.bts-sp-result {
+.utt-sp-result {
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 0.72rem;
@@ -1862,7 +1862,7 @@ select.bts-input { cursor: pointer; }
 }
 
 /* ── Log box ────────────────────────────────────────────────── */
-.bts-log-box {
+.utt-log-box {
   background: var(--tk-navy);
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-sm);
@@ -1877,7 +1877,7 @@ select.bts-input { cursor: pointer; }
 }
 
 /* ── YAML preview overlay ───────────────────────────────────── */
-.bts-overlay {
+.utt-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.6);
@@ -1886,7 +1886,7 @@ select.bts-input { cursor: pointer; }
   align-items: center;
   justify-content: center;
 }
-.bts-modal {
+.utt-modal {
   background: var(--tk-navy-light);
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-lg);
@@ -1896,19 +1896,19 @@ select.bts-input { cursor: pointer; }
   max-height: 80vh;
   overflow-y: auto;
 }
-.bts-modal-header {
+.utt-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: var(--sp-4);
 }
-.bts-modal h4 {
+.utt-modal h4 {
   font-size: 0.85rem;
   color: var(--tk-green);
   margin-top: var(--sp-3);
   margin-bottom: var(--sp-1);
 }
-.bts-yaml-preview {
+.utt-yaml-preview {
   background: var(--tk-navy);
   border: 1px solid var(--tk-border);
   border-radius: var(--radius-sm);
@@ -1921,17 +1921,17 @@ select.bts-input { cursor: pointer; }
 }
 
 /* ── Empty state ────────────────────────────────────────────── */
-.bts-empty { margin-top: var(--sp-4); }
+.utt-empty { margin-top: var(--sp-4); }
 
 /* ── Settings card ──────────────────────────────────────────── */
-.bts-settings-card {
+.utt-settings-card {
   margin-bottom: var(--sp-4);
   border-left: 3px solid var(--tk-fg-muted);
 }
-.bts-settings-card h3 { font-size: 0.95rem; margin-bottom: var(--sp-3); }
+.utt-settings-card h3 { font-size: 0.95rem; margin-bottom: var(--sp-3); }
 
 /* ── NUKE reset button ──────────────────────────────────────── */
-.bts-nuke-btn {
+.utt-nuke-btn {
   background: var(--tk-red) !important;
   color: #fff !important;
   font-weight: 700;
@@ -1944,18 +1944,18 @@ select.bts-input { cursor: pointer; }
   transition: all var(--duration) var(--ease);
   cursor: pointer;
 }
-.bts-nuke-btn:hover {
+.utt-nuke-btn:hover {
   background: #dc2626 !important;
   border-color: #dc2626;
   box-shadow: 0 0 16px rgba(239, 68, 68, 0.35);
   transform: scale(1.03);
 }
-.bts-nuke-btn:active {
+.utt-nuke-btn:active {
   transform: scale(0.97);
 }
 
 /* ── COM port guidance banner ───────────────────────────────── */
-.bts-com-guidance {
+.utt-com-guidance {
   margin-top: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
   background: var(--tk-yellow-dim);
@@ -1964,14 +1964,15 @@ select.bts-input { cursor: pointer; }
   font-size: 0.82rem;
   color: var(--tk-fg);
 }
-.bts-com-guidance strong {
+.utt-com-guidance strong {
   display: block;
   color: var(--tk-yellow);
   margin-bottom: var(--sp-1);
 }
-.bts-com-guidance ol {
+.utt-com-guidance ol {
   margin: var(--sp-2) 0 0 var(--sp-4);
 }
-.bts-com-guidance li {
+.utt-com-guidance li {
   margin-bottom: 2px;
 }
+

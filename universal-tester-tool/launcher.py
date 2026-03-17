@@ -1,5 +1,5 @@
 """
-Launcher wrapper for universal-bts-tester.
+Launcher wrapper for universal-tester-tool.
 Stubs out BLE driver imports (pc_ble_driver_py / blatann) so the tester
 can run on systems without a Nordic BLE dongle.
 """
@@ -40,15 +40,25 @@ sys.modules["blatann.gap.gap_types"].ConnectionParameters = type(
 
 # ── now run the real main.py ──────────────────────────────────────────
 # argv is forwarded as-is (launcher.py replaces main.py in the command)
-bts_root = os.environ.get("BTS_ROOT") or os.path.dirname(os.path.abspath(__file__))
-# If BTS_ROOT is provided, use it; otherwise fall back to script dir parent
-if "BTS_ROOT" in os.environ:
-    bts_root = os.environ["BTS_ROOT"]
+universal_tester_tool_root = os.environ.get("UNIVERSAL_TESTER_TOOL_ROOT") or os.path.dirname(os.path.abspath(__file__))
+# If UNIVERSAL_TESTER_TOOL_ROOT is relative, resolve it safely.
+if not os.path.isabs(universal_tester_tool_root):
+    cwd_resolved = os.path.abspath(universal_tester_tool_root)
+    repo_resolved = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", universal_tester_tool_root)
+    )
+    if os.path.isdir(cwd_resolved):
+        universal_tester_tool_root = cwd_resolved
+    elif os.path.isdir(repo_resolved):
+        universal_tester_tool_root = repo_resolved
+    else:
+        universal_tester_tool_root = cwd_resolved
 
-os.chdir(bts_root)
-if bts_root not in sys.path:
-    sys.path.insert(0, bts_root)
+os.chdir(universal_tester_tool_root)
+if universal_tester_tool_root not in sys.path:
+    sys.path.insert(0, universal_tester_tool_root)
 
 # Import and let main.py's top-level code execute
 import runpy
-runpy.run_path(os.path.join(bts_root, "main.py"), run_name="__main__")
+runpy.run_path(os.path.join(universal_tester_tool_root, "main.py"), run_name="__main__")
+

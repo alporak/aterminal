@@ -6,7 +6,9 @@
 	path = easy-catcher
 	url = git@gps-gitlab.teltonika.lt:fleet/tools/easy-catcher.git
 	branch = master
-[submodule "third_party/universal-bts-tester"]
-	path = third_party/universal-bts-tester
+[submodule "third_party/universal-tester-tool"]
+	path = third_party/universal-tester-tool
 	url = https://gps-gitlab.teltonika.lt/fleet/tools/universal-bts-tester.git
 	branch = master
+
+

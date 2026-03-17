@@ -8,6 +8,7 @@ import "./logs.js";
 import "./com.js";
 import "./jira.js";
 import "./release.js";
-import "./bts.js";
+import "./universal_tester_tool.js";
 
 document.addEventListener("DOMContentLoaded", boot);
+

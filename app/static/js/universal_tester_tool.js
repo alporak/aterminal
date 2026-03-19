@@ -455,11 +455,16 @@ registerPlugin({
       return h("label", { className: "utt-field-inline" }, h("span", null, label + ":"), inp);
     };
 
+    // Updated mkSelect to handle both array of strings and array of objects {value, label}
     const mkSelect = (label, key, val, options) => {
       const sel = h("select", { className: "utt-input utt-input-sm" });
       for (const opt of options) {
-        const optEl = h("option", { value: opt }, opt);
-        if (opt === val) optEl.selected = true;
+        const isObj = typeof opt === "object";
+        const v = isObj ? opt.value : opt;
+        const txt = isObj ? opt.label : opt;
+        
+        const optEl = h("option", { value: v }, txt);
+        if (v === val) optEl.selected = true;
         sel.appendChild(optEl);
       }
       sel.addEventListener("change", () => { step[key] = sel.value; });
@@ -477,6 +482,11 @@ registerPlugin({
       container.appendChild(mkSelect("Error Level", "error_level", step.error_level || "Warning", ["Warning", "Error"]));
     } else if (t === "read_response") {
       container.appendChild(mkF("Expected Output", "output", step.output));
+      container.appendChild(mkSelect("Match Type", "match_type", step.match_type || "loose", [
+        {value: "loose", label: "Loose (Anywhere)"},
+        {value: "strict", label: "Strict (Exact Line)"},
+        {value: "regex", label: "Regex (Raw)"}
+      ]));
       container.appendChild(this._renderArgsField(step));
       container.appendChild(mkF("Timeout (s)", "timeout", step.timeout, "number"));
       container.appendChild(mkF("Retry", "retry", step.retry, "number"));
@@ -484,6 +494,11 @@ registerPlugin({
     } else if (t === "send_and_verify") {
       container.appendChild(mkF("Command", "input", step.input));
       container.appendChild(mkF("Expected Output", "output", step.output));
+      container.appendChild(mkSelect("Match Type", "match_type", step.match_type || "loose", [
+        {value: "loose", label: "Loose (Anywhere)"},
+        {value: "strict", label: "Strict (Exact Line)"},
+        {value: "regex", label: "Regex (Raw)"}
+      ]));
       container.appendChild(this._renderArgsField(step));
       container.appendChild(mkF("Timeout (s)", "timeout", step.timeout, "number"));
       container.appendChild(mkF("Retry", "retry", step.retry, "number"));
@@ -690,6 +705,12 @@ registerPlugin({
         h("span", { className: "text-muted", style: { fontFamily: "var(--font-mono)", fontSize: "0.78rem" } },
           status.log_file)));
     }
+    if (status.run_logs_dir) {
+      info.appendChild(h("div", null,
+        h("strong", null, "Run Logs Folder: "),
+        h("span", { className: "text-muted", style: { fontFamily: "var(--font-mono)", fontSize: "0.78rem" } },
+          status.run_logs_dir)));
+    }
 
     const btnRow = h("div", { style: { marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center" } });
 
@@ -697,13 +718,38 @@ registerPlugin({
       className: "btn utt-nuke-btn",
       onclick: async () => {
         try {
+          // Close our WebSockets first so nothing races
+          if (_ws) { try { _ws.close(); } catch {} _ws = null; }
+          if (_bgWs) { try { _bgWs.close(); } catch {} _bgWs = null; }
+          if (_bgWsTimer) { clearInterval(_bgWsTimer); _bgWsTimer = null; }
           await api(`/api/${PLUGIN_ID}/reset`, { method: "POST" });
-          toast("STOP & KILL complete — all Universal Tester Tool processes killed", "success", 3000);
-        } catch (e) { toast("Reset failed: " + e.message, "error"); }
-        this._refreshStatus();
+          toast("STOP & KILL complete — reloading fresh slate…", "success", 2000);
+          // Give the toast a moment to show, then hard-reload for a clean state
+          setTimeout(() => { location.reload(); }, 1200);
+        } catch (e) {
+          toast("Reset failed: " + e.message, "error");
+          // Reload anyway to recover from potentially broken state
+          setTimeout(() => { location.reload(); }, 2000);
+        }
       },
     }, "☢ STOP & KILL");
     btnRow.appendChild(nukeBtn);
+
+    const openLogsBtn = h("button", {
+      className: "btn",
+      onclick: async () => {
+        try {
+          const res = await api(`/api/${PLUGIN_ID}/open_logs_folder`, { method: "POST" });
+          toast("Opened logs folder", "success", 2500);
+          if (res?.path) {
+            this._refreshStatus();
+          }
+        } catch (e) {
+          toast("Open logs failed: " + e.message, "error");
+        }
+      },
+    }, "📂 Open Logs Folder");
+    btnRow.appendChild(openLogsBtn);
 
     info.appendChild(btnRow);
 
@@ -722,6 +768,77 @@ registerPlugin({
     }
 
     body.appendChild(info);
+    if (stepsBox) {
+      stepsBox.innerHTML = "";
+      const stepIcons = {
+        pending: "○",
+        running: "◉",
+        passed: "✓",
+        failed: "✗",
+      };
+
+      const renderStepRow = (step) => {
+        const icon = stepIcons[step.status] || "○";
+        const cls = step.status || "pending";
+        const row = h(
+          "div",
+          { className: `utt-step-progress utt-sp-${cls}` },
+          h("span", { className: "utt-sp-icon" }, icon),
+          h("span", { className: "utt-sp-num" }, `${step.index + 1}`),
+          h("span", { className: "utt-sp-label" }, step.label),
+        );
+        if (step.detail) {
+          row.appendChild(
+            h("span", { className: "utt-sp-detail" }, step.detail),
+          );
+        }
+        if (step.result) {
+          row.appendChild(
+            h(
+              "span",
+              { className: `utt-sp-result utt-sp-${cls}` },
+              step.result,
+            ),
+          );
+        }
+        return row;
+      };
+
+      // Render completed iterations from history
+      if (status.history?.length) {
+        for (const pastRun of status.history) {
+          const resultText = pastRun.passed ? "PASSED" : "FAILED";
+          const resultCls = pastRun.passed ? "success" : "error";
+          const header = h(
+            "h4",
+            { className: "utt-iteration-header" },
+            `Iteration ${pastRun.iteration}`,
+            h(
+              "span",
+              { className: `utt-badge utt-badge-${resultCls}` },
+              resultText,
+            ),
+          );
+          stepsBox.appendChild(header);
+          for (const step of pastRun.steps) {
+            stepsBox.appendChild(renderStepRow(step));
+          }
+        }
+      }
+
+      // Render the current, active iteration
+      if (status.running && status.steps?.length) {
+        const header = h(
+          "h4",
+          { className: "utt-iteration-header" },
+          `Iteration ${status.current_iteration} (Running)`,
+        );
+        stepsBox.appendChild(header);
+        for (const step of status.steps) {
+          stepsBox.appendChild(renderStepRow(step));
+        }
+      }
+    }
 
     // Render step progress
     if (stepsBox && status.steps?.length) {

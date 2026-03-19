@@ -19,6 +19,8 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+import re as _re
+
 from app.plugins.base import ToolkitPlugin
 from app import config
 
@@ -75,7 +77,7 @@ STEP_CATALOG = [
         "category": "Serial",
         "description": "Read and verify output from terminal",
         "defaults": {
-            "resource": "Terminal", "output": "", "args": [],
+            "resource": "Terminal", "output": "", "match_type": "loose", "args": [],
             "timeout": 40, "retry": 1, "error_level": "Warning",
         },
     },
@@ -86,7 +88,7 @@ STEP_CATALOG = [
         "category": "Serial",
         "description": "Send command and verify the response",
         "defaults": {
-            "resource": "Terminal", "input": "", "output": "", "args": [],
+            "resource": "Terminal", "input": "", "output": "", "match_type": "loose", "args": [],
             "timeout": 40, "retry": 1, "error_level": "Warning",
         },
     },
@@ -173,13 +175,39 @@ class RunState:
         self.status = "idle"  # idle | running | completed | failed | stopped
         self.started_at: Optional[str] = None
         self.case_name: str = ""
-        self.steps: list[dict] = []      # step tracker for the UI
-        self.current_step: int = -1      # index into self.steps
-        self._expected_funcs: list[str] = []  # expected func-print per step
-        self._func_cursor: int = 0       # next expected func-print index
+        self.steps: list[dict] = []      
+        self.current_step: int = -1      
+        self._expected_funcs: list[str] = []  
+        self._func_cursor: int = 0       
         self._lock = threading.Lock()
-        self.fail_reason: str = ""       # 'com_port' | '' — helps UI show guidance
-        self.log_file: str = ""          # path to saved log file
+        self.fail_reason: str = ""       
+        self.log_file: str = ""          
+        self.device_name: str = ""       
+        self.utt_root: str = ""          
+        self.run_logs_dir: str = ""      
+        self.log_file_handle = None
+        self.history: list[dict] = []
+        
+    def init_log_file(self):
+        """Open a log file handle for real-time streaming."""
+        cfg = config.load()
+        log_dir = cfg.get("universal_tester_tool_log_dir", os.path.join(ROOT, "output", "universal_tester_tool_logs"))
+        os.makedirs(log_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        case_slug = self.case_name.replace(" ", "_")[:30] if self.case_name else "unknown"
+        self.log_file = os.path.join(log_dir, f"{ts}_{case_slug}.log")
+        try:
+            self.log_file_handle = open(self.log_file, "w", encoding="utf-8")
+            self.append_log(f"[LOG] Streaming live logs to {self.log_file}")
+        except Exception as e:
+            self.append_log(f"[LOG] Failed to open live log file: {e}")
+            self.log_file_handle = None
+
+    def close_log_file(self):
+        with self._lock:
+            if self.log_file_handle:
+                self.log_file_handle.close()
+                self.log_file_handle = None
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -193,14 +221,23 @@ class RunState:
                 "started_at": self.started_at,
                 "log_tail": self.log_lines[-100:],
                 "steps": list(self.steps),
+                "history": list(self.history),
                 "current_step": self.current_step,
                 "fail_reason": self.fail_reason,
                 "log_file": self.log_file,
+                "run_logs_dir": self.run_logs_dir,
             }
 
     def append_log(self, line: str):
         with self._lock:
             self.log_lines.append(line)
+            # Write to disk in real-time
+            if self.log_file_handle:
+                try:
+                    self.log_file_handle.write(line + "\n")
+                    self.log_file_handle.flush()
+                except Exception:
+                    pass
             self._parse_line(line)
 
     def _parse_line(self, line: str):
@@ -264,7 +301,8 @@ class RunState:
             return
 
         # Detect routine-level pass/fail:  "[Name] PASSED" or "[Name] Warning/Error"
-        if stripped.startswith("[") and ("PASSED" in stripped or "Warning" in stripped or "Error" in stripped):
+        if ("PASSED" in stripped or "Warning" in stripped or "Error" in stripped) and "Elapsed time:" in stripped:
+            self.iteration_done = True
             if "PASSED" in stripped:
                 # Mark any still-running step as passed
                 if self.current_step >= 0 and self.current_step < len(self.steps):
@@ -276,9 +314,14 @@ class RunState:
                         self.steps[self.current_step]["status"] = "failed"
                         self.steps[self.current_step]["result"] = stripped
 
+        # Backup end-of-test triggers
+        if "Scheduler off" in stripped or "FS thread dead" in stripped:
+            self.iteration_done = True
+
     def init_steps(self, case_steps: list[dict]):
         """Initialise step tracker for a new iteration."""
         with self._lock:
+            self.iteration_done = False   # <-- Add this flag
             self.steps = _build_step_tracker(case_steps)
             self.current_step = -1
             self._expected_funcs = [
@@ -287,7 +330,9 @@ class RunState:
             self._func_cursor = 0
 
     def reset(self):
+        self.close_log_file()
         with self._lock:
+            self.iteration_done = False   # <-- Add this flag
             self.running = False
             self.process = None
             self.log_lines = []
@@ -303,6 +348,40 @@ class RunState:
             self._func_cursor = 0
             self.fail_reason = ""
             self.log_file = ""
+            self.device_name = ""
+            self.utt_root = ""
+            self.run_logs_dir = ""
+            self.history = []
+
+
+def _find_latest_run_logs_dir(utt_root: str, device_name: str = "") -> str:
+    """Resolve the newest UTT run Logs directory, optionally filtered by device name."""
+    reports_dir = os.path.join(utt_root, "Reports")
+    if not os.path.isdir(reports_dir):
+        return ""
+
+    try:
+        entries = [
+            d for d in os.listdir(reports_dir)
+            if os.path.isdir(os.path.join(reports_dir, d)) and d.startswith("Report_")
+        ]
+    except Exception:
+        return ""
+
+    if device_name:
+        prefix = f"Report_{device_name}_"
+        filtered = [d for d in entries if d.startswith(prefix)]
+        if filtered:
+            entries = filtered
+
+    entries.sort(key=lambda d: os.path.getmtime(os.path.join(reports_dir, d)), reverse=True)
+
+    for folder in entries:
+        logs_dir = os.path.join(reports_dir, folder, "Logs")
+        if os.path.isdir(logs_dir):
+            return logs_dir
+
+    return reports_dir
 
 
 _run = RunState()
@@ -338,20 +417,48 @@ def _force_kill_process_tree(proc: Optional[subprocess.Popen]):
         pass
 
 
+def _get_protected_pids() -> set[str]:
+    """Return a set of PID strings that must never be killed (server + ancestors)."""
+    protected = {str(os.getpid())}
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        for parent in proc.parents():
+            protected.add(str(parent.pid))
+    except Exception:
+        # psutil may not be installed; fall back to PowerShell parent lookup
+        try:
+            ps_cmd = (
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId={os.getpid()}\""
+                ").ParentProcessId"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            ppid = result.stdout.strip()
+            if ppid and ppid.isdigit():
+                protected.add(ppid)
+        except Exception:
+            pass
+    return protected
+
+
 def _nuke_all_universal_tester_tool_processes():
-    """Kill every Python process whose command-line references universal-tester-tool/launcher.
+    """Kill every Python process whose command-line references the UTT launcher.
 
     Uses PowerShell's Get-CimInstance (reliable, unlike deprecated wmic) to find
-    orphaned processes, then taskkill /T /F each one.
+    orphaned processes, then taskkill /F each one.  Carefully excludes the
+    server process and all its ancestors so the toolkit stays alive.
     """
     if os.name != "nt":
         return
-    my_pid = str(os.getpid())
+    protected = _get_protected_pids()
     try:
-        # PowerShell one-liner: get PIDs of python processes matching our keywords
+        # Only match processes that are clearly UTT launcher invocations
         ps_cmd = (
             "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='python3.exe' or Name='pythonw.exe'\" "
-            "| Where-Object { $_.CommandLine -match 'launcher\\.py|universal-tester-tool' } "
+            "| Where-Object { $_.CommandLine -match 'launcher\\.py.*universal-tester-tool|universal-tester-tool.*launcher\\.py' } "
             "| Select-Object -ExpandProperty ProcessId"
         )
         result = subprocess.run(
@@ -360,9 +467,9 @@ def _nuke_all_universal_tester_tool_processes():
         )
         for line in result.stdout.strip().splitlines():
             pid = line.strip()
-            if pid and pid.isdigit() and pid != my_pid:
+            if pid and pid.isdigit() and pid not in protected:
                 subprocess.run(
-                    ["taskkill", "/PID", pid, "/T", "/F"],
+                    ["taskkill", "/PID", pid, "/F"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     check=False, timeout=10,
                 )
@@ -372,6 +479,34 @@ def _nuke_all_universal_tester_tool_processes():
 
 # ── YAML generation ────────────────────────────────────────────────
 
+# Regex metacharacters that need escaping so UTT compiles them as literals.
+_REGEX_META = _re.compile(r'(%\w+%)|([\[\](){}.*+?^$|\\])')
+
+
+def _format_output_for_yaml(output: str, match_type: str = "loose") -> str:
+    """
+    Format the output string for YAML compilation based on match_type.
+    - loose (default): escapes regex metacharacters, matches anywhere in the string.
+    - strict: escapes regex metacharacters, but forces an exact line match using anchors.
+    - regex: treats the input as raw regex, only double-escaping backslashes for YAML parsing.
+    """
+    if match_type == "regex":
+        # Just double-escape backslashes for the YAML parser
+        return output.replace("\\", "\\\\")
+
+    # For strict/loose, we escape regex metacharacters but preserve %var% placeholders
+    def _replacer(m: _re.Match) -> str:
+        if m.group(1):          
+            return m.group(1)
+        return "\\\\" + m.group(2)
+        
+    escaped = _REGEX_META.sub(_replacer, output)
+
+    if match_type == "strict":
+        # Anchors force full line match. \s* allows for trailing \r or \n
+        return f"^\\\\s*{escaped}\\\\s*$"
+        
+    return escaped
 def _generate_interfaces_yaml(case: dict) -> str:
     iface = case.get("interfaces", {})
     port = iface.get("terminal_port", "COM7")
@@ -387,7 +522,7 @@ def _generate_interfaces_yaml(case: dict) -> str:
         '        data_bits: 8',
         '        stop_bits: 1',
         '        tx_end_line: "\\r"',
-        '        rx_end_line: "\\r\\n"',
+        '        rx_end_line: "\\r"',
     ]
 
     catcher_port = iface.get("catcher_port", "")
@@ -464,7 +599,8 @@ def _step_to_yaml_func(step: dict) -> str:
             f'    Error_level: "{step.get("error_level", "Warning")}"',
         ]
     elif t == "read_response":
-        output = step.get("output", "")
+        match_type = step.get("match_type", "loose")
+        output = _format_output_for_yaml(step.get("output", ""), match_type)
         lines = [
             '- !Func',
             '    func: "UartRead"',
@@ -485,7 +621,8 @@ def _step_to_yaml_func(step: dict) -> str:
             f'    Error_level: "{step.get("error_level", "Warning")}"',
         ]
     elif t == "send_and_verify":
-        output = step.get("output", "")
+        match_type = step.get("match_type", "loose")
+        output = _format_output_for_yaml(step.get("output", ""), match_type)
         lines = [
             '- !Func',
             '    func: "UartWriteRead"',
@@ -508,12 +645,19 @@ def _step_to_yaml_func(step: dict) -> str:
             f'    Error_level: "{step.get("error_level", "Warning")}"',
         ]
     elif t == "delay":
+        delay_val = step.get("delay", 5)
+        timeout_val = step.get("timeout", 40)
+        
+        # Prevent premature step failure: timeout must be strictly larger than the delay duration
+        if timeout_val <= delay_val:
+            timeout_val = delay_val + 5
+            
         lines = [
             '- !Func',
             '    func: "Delay"',
             '    resource: "OS"',
-            f'    delay: {step.get("delay", 5)}',
-            f'    timeout: {step.get("timeout", 40)}',
+            f'    delay: {delay_val}',
+            f'    timeout: {timeout_val}',
             f'    retry: {step.get("retry", 1)}',
             f'    Error_level: "{step.get("error_level", "Warning")}"',
         ]
@@ -632,11 +776,17 @@ def _prepare_run_directory(case: dict) -> dict:
 
 # ── Test runner ─────────────────────────────────────────────────────
 
-def _run_test_thread(case: dict, paths: dict):
+def _run_test_thread(case: dict, paths: dict, my_run_id: str):
     """Run the Universal Tester Tool engine in a background thread."""
     global _run
     utt_root = paths["utt_root"]
     run_dir_rel = paths["run_dir_rel"]
+
+    # --- Create ONE UTT report directory for the whole run ---
+    device_name = case.get("device_name", "FMB_Device")
+    current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    utt_report_dir = os.path.join(utt_root, "Reports", f"Report_{device_name}_{current_date}_id_{my_run_id}")
+    os.makedirs(os.path.join(utt_report_dir, "Logs"), exist_ok=True)
 
     iterations = case.get("iterations", 1)
     _run.total_iterations = iterations
@@ -645,22 +795,32 @@ def _run_test_thread(case: dict, paths: dict):
         if not _run.running:
             break
 
+        # --- At the end of the previous iteration, snapshot the results for the UI history ---
+        if iteration > 1:
+            with _run._lock:
+                # Get the final state of the previous iteration's steps
+                last_steps = list(_run.steps)
+                _run.history.append({
+                    "iteration": iteration - 1,
+                    "steps": last_steps,
+                    "passed": all(s.get("status") == "passed" for s in last_steps)
+                })
+
         _run.current_iteration = iteration
         _run.init_steps(case.get("steps", []))
         _run.append_log(f"\n{'='*60}")
         _run.append_log(f"  ITERATION {iteration}/{iterations}")
         _run.append_log(f"{'='*60}\n")
 
-        # Use our launcher wrapper to stub BLE imports (avoids
-        # pc-ble-driver-py native dependency that can't install on Py3.11).
         launcher = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             "universal-tester-tool", "launcher.py",
         )
         cmd = [
             sys.executable, "-u", launcher,
-            "-app_type", "test",
-            "-paths", run_dir_rel,
+            "-a", "test",
+            "-p", run_dir_rel,
+            "--output_dir", utt_report_dir,
         ]
         _run.append_log(f"[CMD] {' '.join(cmd)}")
         _run.append_log(f"[CWD] {utt_root}")
@@ -703,15 +863,27 @@ def _run_test_thread(case: dict, paths: dict):
             while True:
                 if not _run.running:
                     break
+                
+                # THE NUCLEAR OPTION: If the test logic has finished but Windows locked the COM port,
+                # we purposefully execute the Stop & Kill function and break the loop to move to the next iteration.
+                if getattr(_run, 'iteration_done', False):
+                    time.sleep(1)  # Let any final logging statements flush
+                    _run.append_log("\n[TOOLKIT] Test logic complete. Forcefully terminating deadlocked subprocess...")
+                    _force_kill_process_tree(proc)
+                    _nuke_all_universal_tester_tool_processes()
+                    break
+
                 try:
-                    line = _line_q.get(timeout=2)
+                    line = _line_q.get(timeout=1)
                 except _queue.Empty:
-                    # No output for 2s — check if process died
+                    # No output for 1s — check if process died naturally
                     if proc.poll() is not None:
                         break
                     continue
+                    
                 if line is None:
                     break  # pipe closed
+                
                 _no_output_since = time.time()
                 stripped = line.rstrip()
                 if stripped:
@@ -721,30 +893,78 @@ def _run_test_thread(case: dict, paths: dict):
                     if "Failed to open COM" in stripped or "could not open port" in stripped:
                         _run.append_log("[ACTION] COM port is busy or locked by another tool.")
                         _run.append_log("[ACTION] Close any program using the port (e.g. PuTTY, Catcher, another terminal), then press NUKE RESET and retry.")
-                        with _run._lock:
-                            for s in _run.steps:
-                                if s["status"] == "running":
-                                    s["status"] = "failed"
-                                    s["result"] = "COM port busy"
-                            _run.status = "failed"
-                            _run.fail_reason = "com_port"
-                            _run.running = False
+                        if _run.run_id == my_run_id:
+                            with _run._lock:
+                                for s in _run.steps:
+                                    if s["status"] == "running":
+                                        s["status"] = "failed"
+                                        s["result"] = "COM port busy"
+                                _run.status = "failed"
+                                _run.fail_reason = "com_port"
+                                _run.running = False
                         _force_kill_process_tree(proc)
                         return
 
-            # Clean up process — it may already be dead from stop/nuke.
+            # Clean up process
             try:
-                if proc.poll() is None:
-                    proc.kill()
                 proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+                
+            exit_code = proc.returncode
+
+            all_steps_passed = all(
+                s["status"] == "passed" for s in _run.steps
+            ) if _run.steps else False
+
+            if _run.run_id == my_run_id:
+                _run.append_log(f"[EXIT] Process exited with code {exit_code}")
+
+            # If we nuked it because it finished, exit_code will be non-zero (like 1 or -9). 
+            # We must ignore the non-zero exit code if iteration_done is True.
+            is_done = getattr(_run, 'iteration_done', False)
+            if exit_code != 0 and _run.running and _run.run_id == my_run_id and not is_done and not all_steps_passed:
+                _run.append_log(f"[FAIL] Subprocess crashed on iteration {iteration}")
+                with _run._lock:
+                    for s in _run.steps:
+                        if s["status"] == "running":
+                            s["status"] = "failed"
+                            s["result"] = f"Process exited with code {exit_code}"
+                    _run.status = "failed"
+                    _run.running = False
+                return  # stop iterating
+            # Clean up process — let it exit naturally.  The UTT engine
+            # should exit within ~1-2s after the test finishes.
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             except Exception:
                 pass
             exit_code = proc.returncode
+
+            # Check if all steps in this iteration actually passed.
+            # The UTT engine doesn't use meaningful exit codes — we parse
+            # step results from stdout, so trust those over the exit code.
+            all_steps_passed = all(
+                s["status"] == "passed" for s in _run.steps
+            ) if _run.steps else False
+
             # Only log if we're still the active run (stop/nuke may have reset us).
-            if _run.run_id:
+            if _run.run_id == my_run_id:
                 _run.append_log(f"[EXIT] Process exited with code {exit_code}")
 
-            if exit_code != 0 and _run.running:
+            if exit_code != 0 and _run.running and _run.run_id == my_run_id and not all_steps_passed:
                 _run.append_log(f"[FAIL] Subprocess crashed on iteration {iteration}")
                 # Mark any in-progress step as failed
                 with _run._lock:
@@ -757,6 +977,8 @@ def _run_test_thread(case: dict, paths: dict):
                 return  # stop iterating
 
         except Exception as e:
+            if _run.run_id != my_run_id:
+                return
             _run.append_log(f"[ERROR] {e}")
             with _run._lock:
                 for s in _run.steps:
@@ -768,6 +990,9 @@ def _run_test_thread(case: dict, paths: dict):
             return
 
     with _run._lock:
+        # Only update state if this thread's run is still the active one
+        if _run.run_id != my_run_id:
+            return  # a reset/stop already wiped our run — don't overwrite
         if _run.running:
             _run.status = "completed"
             _run.append_log("\n[DONE] All iterations completed successfully.")
@@ -775,6 +1000,9 @@ def _run_test_thread(case: dict, paths: dict):
             _run.status = "stopped"
             _run.append_log("\n[STOPPED] Test was stopped by user.")
         _run.running = False
+
+    # Safely close the real-time file stream
+    _run.close_log_file()
 
     # Save terminal log to file
     _save_log_file()
@@ -972,8 +1200,12 @@ class UniversalTesterToolPlugin(ToolkitPlugin):
             _run.started_at = datetime.now().isoformat()
             _run.case_name = case.get("name", case_id)
             _run.total_iterations = case.get("iterations", 1)
-
-            thread = threading.Thread(target=_run_test_thread, args=(case, paths), daemon=True)
+            _run.device_name = case.get("device_name", "")
+            _run.utt_root = utt_root
+            _run.run_logs_dir = ""
+            _run.init_log_file()
+            run_id = _run.run_id
+            thread = threading.Thread(target=_run_test_thread, args=(case, paths, run_id), daemon=True)
             thread.start()
 
             return {"run_id": _run.run_id, "status": "started"}
@@ -1009,7 +1241,40 @@ class UniversalTesterToolPlugin(ToolkitPlugin):
 
         @app.get("/api/universal_tester_tool/status")
         async def get_status():
+            if _run.utt_root and not _run.run_logs_dir:
+                found_logs_dir = _find_latest_run_logs_dir(_run.utt_root, _run.device_name)
+                if found_logs_dir:
+                    _run.run_logs_dir = found_logs_dir
             return _run.to_dict()
+
+        @app.post("/api/universal_tester_tool/open_logs_folder")
+        async def open_run_logs_folder():
+            cfg = config.load()
+            utt_root = _run.utt_root or _resolve_utt_root(
+                cfg.get("universal_tester_tool_path", _DEFAULT_UNIVERSAL_TESTER_TOOL_PATH)
+            )
+
+            logs_dir = _run.run_logs_dir
+            if not logs_dir or not os.path.isdir(logs_dir):
+                logs_dir = _find_latest_run_logs_dir(utt_root, _run.device_name)
+
+            if not logs_dir or not os.path.isdir(logs_dir):
+                from fastapi import HTTPException
+                raise HTTPException(404, "Run logs folder was not found")
+
+            try:
+                if os.name == "nt":
+                    os.startfile(logs_dir)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", logs_dir])
+                else:
+                    subprocess.Popen(["xdg-open", logs_dir])
+            except Exception as e:
+                from fastapi import HTTPException
+                raise HTTPException(500, f"Failed to open logs folder: {e}")
+
+            _run.run_logs_dir = logs_dir
+            return {"ok": True, "path": logs_dir}
 
         # ── COM port discovery ──────────────────────────────────
 
@@ -1032,7 +1297,9 @@ class UniversalTesterToolPlugin(ToolkitPlugin):
         async def ws_universal_tester_tool(ws: WebSocket):
             await ws.accept()
             _ws_clients.add(ws)
-            last_len = 0
+            # Start from current length so the HTTP status fetch (log_tail)
+            # handles initial log population without the WS duplicating it.
+            last_len = len(_run.log_lines)
             try:
                 while True:
                     await asyncio.sleep(1)
